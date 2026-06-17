@@ -1,0 +1,43 @@
+# --- Eclipse private data (NEVER commit meeting content) ---
+/inbox/
+/vault/
+/archive/
+/data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Audio / media
+*.m4a
+*.mp3
+*.wav
+*.aac
+*.ogg
+*.flac
+*.mp4
+*.webm
+
+# Secrets / local config
+.env
+eclipse.toml
+eclipse.local.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Whisper model cache (downloaded on first run)
+/models/

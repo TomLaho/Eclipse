@@ -1,0 +1,108 @@
+from datetime import date
+from pathlib import Path
+
+from eclipse.config import Config
+from eclipse.ingest.registry import Registry
+from eclipse.models import ActionItem, MeetingInsights, TranscriptResult
+from eclipse.pipeline import Pipeline, meeting_date_for
+
+
+class FakeTranscriber:
+    def transcribe(self, path: Path) -> TranscriptResult:
+        return TranscriptResult(text="hello world from the meeting", duration_sec=90.0)
+
+    def descriptor(self) -> str:
+        return "fake-whisper"
+
+
+class FakeEnricher:
+    def __init__(self, *, raise_: bool = False, enriched: bool = True) -> None:
+        self.raise_ = raise_
+        self.enriched = enriched
+
+    def enrich(
+        self, text: str, meeting_date: date, source_name: str
+    ) -> tuple[MeetingInsights, bool]:
+        if self.raise_:
+            raise RuntimeError("boom")
+        ins = MeetingInsights(
+            title="Mtg",
+            summary="s",
+            client="Acme",
+            action_items=[ActionItem(task="Do thing", owner="Tom")],
+        )
+        return ins, self.enriched
+
+    def descriptor(self) -> str:
+        return "fake-llm"
+
+
+def _cfg(tmp_path: Path, retention: str = "keep") -> Config:
+    c = Config(
+        inbox_dir=tmp_path / "inbox",
+        vault_dir=tmp_path / "vault",
+        archive_dir=tmp_path / "archive",
+        registry_path=tmp_path / "data" / "r.sqlite",
+        audio_retention=retention,  # type: ignore[arg-type]
+    )
+    c.resolve_paths()
+    c.ensure_dirs()
+    return c
+
+
+def _drop(cfg: Config, name: str = "2026-06-17-rec.wav", data: bytes = b"RIFFfakeaudio") -> Path:
+    f = cfg.inbox_dir / name
+    f.write_bytes(data)
+    return f
+
+
+def test_meeting_date_from_filename(tmp_path: Path) -> None:
+    f = tmp_path / "2026-06-17-call.wav"
+    f.write_bytes(b"x")
+    assert meeting_date_for(f) == date(2026, 6, 17)
+
+
+def test_meeting_date_falls_back_to_mtime(tmp_path: Path) -> None:
+    f = tmp_path / "call.wav"
+    f.write_bytes(b"x")
+    assert isinstance(meeting_date_for(f), date)
+
+
+def test_process_writes_note_and_keeps_audio(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    f = _drop(cfg)
+    with Registry(cfg.registry_path) as reg:
+        result = Pipeline(cfg, FakeTranscriber(), FakeEnricher(), reg).process_file(f)
+    assert result.status == "written"
+    assert result.note_path is not None and result.note_path.exists()
+    assert not f.exists()  # moved out of the inbox
+    assert len(list(cfg.audio_dir.glob("*.wav"))) == 1
+
+
+def test_duplicate_is_skipped_and_discarded(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with Registry(cfg.registry_path) as reg:
+        pipe = Pipeline(cfg, FakeTranscriber(), FakeEnricher(), reg)
+        assert pipe.process_file(_drop(cfg)).status == "written"
+        dup = _drop(cfg, name="copy.wav")  # identical bytes -> identical hash
+        assert pipe.process_file(dup).status == "skipped"
+        assert not dup.exists()
+
+
+def test_delete_retention_removes_audio(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, retention="delete")
+    f = _drop(cfg)
+    with Registry(cfg.registry_path) as reg:
+        Pipeline(cfg, FakeTranscriber(), FakeEnricher(), reg).process_file(f)
+    assert list(cfg.audio_dir.glob("*")) == []
+    assert not f.exists()
+
+
+def test_failure_is_quarantined(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    f = _drop(cfg)
+    with Registry(cfg.registry_path) as reg:
+        result = Pipeline(cfg, FakeTranscriber(), FakeEnricher(raise_=True), reg).process_file(f)
+    assert result.status == "error"
+    assert not f.exists()
+    assert len(list((cfg.archive_dir / "_failed").glob("*"))) == 1
