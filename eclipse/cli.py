@@ -18,6 +18,9 @@ from eclipse.ingest.watcher import scan_inbox, wait_until_stable, watch
 from eclipse.pipeline import Pipeline, PipelineResult
 from eclipse.transcribe.whisper import Transcriber
 
+# Maximum characters to send in a Telegram digest message.
+_TELEGRAM_DIGEST_MAX = 3500
+
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
@@ -202,13 +205,32 @@ def status() -> None:
 @app.command()
 def digest(
     no_briefing: Annotated[bool, typer.Option("--no-briefing")] = False,
+    telegram: Annotated[bool, typer.Option("--telegram")] = False,
 ) -> None:
     """Roll up every open action item across the vault into a digest note."""
     cfg = _cfg()
+    body = review.build_digest(cfg, with_briefing=not no_briefing)
     path = review.write_digest(cfg, with_briefing=not no_briefing)
     open_count = len(review.collect_open_actions(cfg.vault_dir))
     console.print(f"[green]Digest written[/green] -> {path}")
     console.print(f"{open_count} open action item(s) across the vault.")
+
+    if telegram:
+        from eclipse.notify.telegram import TelegramClient
+
+        client = TelegramClient.from_secrets()
+        if client is None:
+            console.print("[red]Telegram not configured (missing bot token or chat id).[/red]")
+            raise typer.Exit(1)
+        truncated = body[:_TELEGRAM_DIGEST_MAX]
+        if len(body) > _TELEGRAM_DIGEST_MAX:
+            truncated += "\n…(truncated)"
+        try:
+            client.send_message(truncated)
+            console.print("[green]Digest sent to Telegram.[/green]")
+        except Exception as exc:
+            console.print(f"[red]Telegram send failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -228,8 +250,245 @@ def todos() -> None:
     console.print(f"[green]{n} open commitment(s)[/green] drafted -> {path}")
 
 
+@app.command(name="telegram-test")
+def telegram_test() -> None:
+    """Send a test message to Telegram to confirm the connection."""
+    from eclipse.notify.telegram import TelegramClient
+
+    client = TelegramClient.from_secrets()
+    if client is None:
+        console.print(
+            "[red]Telegram not configured. "
+            "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env[/red]"
+        )
+        raise typer.Exit(1)
+    try:
+        client.send_message("✅ Eclipse connected")
+        console.print("[green]Test message sent successfully.[/green]")
+    except Exception as exc:
+        console.print(f"[red]Telegram send failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@app.command(name="notion-setup")
+def notion_setup(
+    parent: Annotated[str, typer.Option("--parent", help="Notion page id to create the DB under")],
+) -> None:
+    """Create the Todos database in Notion and print the new database id."""
+    from eclipse.notify.notion import NotionTodos
+
+    todos = NotionTodos.from_secrets()
+    if todos is None:
+        console.print("[red]Notion not configured. Set NOTION_ACCESS_TOKEN in .env[/red]")
+        raise typer.Exit(1)
+    try:
+        db_id = todos.create_database(parent)
+        console.print(f"[green]Todos database created:[/green] {db_id}")
+        console.print("Add this to your .env file:")
+        console.print(f"  NOTION_TODOS_DB_ID={db_id}")
+    except Exception as exc:
+        console.print(f"[red]Notion database creation failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@app.command(name="notion-push")
+def notion_push(
+    approved: Annotated[bool, typer.Option("--approved/--review")] = False,
+) -> None:
+    """Push open actions to Notion (fallback flow — no interactive approval)."""
+    from eclipse.notify.notion import NotionTodos
+
+    cfg = _cfg()
+    from eclipse.secrets import load_secrets
+
+    secrets = load_secrets()
+    if not secrets.notion_todos_db_id:
+        console.print("[red]NOTION_TODOS_DB_ID not set in .env[/red]")
+        raise typer.Exit(1)
+
+    todos = NotionTodos.from_secrets()
+    if todos is None:
+        console.print("[red]Notion not configured. Set NOTION_ACCESS_TOKEN in .env[/red]")
+        raise typer.Exit(1)
+
+    actions = review.collect_open_actions(cfg.vault_dir, cfg.me_aliases, mine_only=True)
+    if not actions:
+        console.print("No open actions assigned to you.")
+        return
+
+    db_id = secrets.notion_todos_db_id
+    status = "Approved" if approved else "Review"
+    pushed = 0
+    skipped = 0
+    for action in actions:
+        try:
+            ok = todos.push_todo(db_id, action, status=status)
+            if ok:
+                pushed += 1
+                console.print(f"  [green]+[/green] {action.task}")
+            else:
+                skipped += 1
+                console.print(f"  [dim]~[/dim] {action.task} (already in Notion)")
+        except Exception as exc:
+            console.print(f"  [red]x[/red] {action.task}: {exc}")
+
+    console.print(f"\n[bold]Done.[/bold] {pushed} pushed, {skipped} skipped.")
+
+
+@app.command()
+def approve() -> None:
+    """Interactively approve open actions via Telegram inline buttons → push to Notion."""
+    from eclipse.notify.notion import NotionTodos
+    from eclipse.notify.telegram import TelegramClient
+    from eclipse.secrets import load_secrets
+
+    cfg = _cfg()
+    secrets = load_secrets()
+
+    # Gate: both Telegram and Notion must be configured.
+    tg = TelegramClient.from_secrets()
+    if tg is None:
+        console.print("[red]Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).[/red]")
+        raise typer.Exit(1)
+
+    notion = NotionTodos.from_secrets()
+    if notion is None:
+        console.print("[red]Notion not configured (NOTION_ACCESS_TOKEN).[/red]")
+        raise typer.Exit(1)
+
+    if not secrets.notion_todos_db_id:
+        console.print("[red]NOTION_TODOS_DB_ID not set in .env[/red]")
+        raise typer.Exit(1)
+
+    db_id = secrets.notion_todos_db_id
+    actions = review.collect_open_actions(cfg.vault_dir, cfg.me_aliases, mine_only=True)
+    if not actions:
+        console.print("No open actions assigned to you.")
+        return
+
+    console.print(f"Sending {len(actions)} action(s) to Telegram for approval…")
+
+    # --- State machine ---
+    # Each action gets one Telegram message with [✅ Approve] [❌ Skip] buttons.
+    # We long-poll get_updates and match callback_query.data to pending message ids.
+    # When all are resolved (or we time out after ~90s idle) we stop.
+
+    # Map: message_id -> OpenAction
+    pending: dict[int, review.OpenAction] = {}
+
+    for action in actions:
+        from eclipse.notify.notion import eclipse_id
+
+        eid = eclipse_id(action)
+        text = (
+            f"<b>{action.task}</b>\n"
+            f"Client: {action.client}  |  Meeting: {action.meeting_title}"
+            + (f"  |  Due: {action.due}" if action.due else "")
+        )
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve", "callback_data": f"approve:{eid}"},
+                    {"text": "❌ Skip", "callback_data": f"skip:{eid}"},
+                ]
+            ]
+        }
+        try:
+            mid = tg.send_message(text, reply_markup=markup)
+            pending[mid] = action
+        except Exception as exc:
+            console.print(f"[red]Failed to send action to Telegram:[/red] {exc}")
+
+    if not pending:
+        return
+
+    # Build a reverse map: eclipse_id -> message_id
+    eid_to_mid: dict[str, int] = {}
+    for mid, action in pending.items():
+        from eclipse.notify.notion import eclipse_id
+
+        eid_to_mid[eclipse_id(action)] = mid
+
+    resolved = 0
+    total = len(pending)
+    update_offset: int | None = None
+    # Allow up to ~90 seconds of idle time (3 polls x 30s timeout) before giving up.
+    idle_polls = 0
+    max_idle_polls = 3
+
+    while resolved < total and idle_polls < max_idle_polls:
+        try:
+            updates = tg.get_updates(offset=update_offset, timeout=30)
+        except Exception as exc:
+            console.print(f"[yellow]Poll error (will retry):[/yellow] {exc}")
+            idle_polls += 1
+            continue
+
+        if not updates:
+            idle_polls += 1
+            continue
+
+        idle_polls = 0  # reset on any activity
+
+        for update in updates:
+            # Advance the offset so we don't re-process the same update.
+            update_offset = update["update_id"] + 1
+
+            cb = update.get("callback_query")
+            if not cb:
+                continue
+
+            callback_id: str = cb.get("id", "")
+            data: str = cb.get("data", "")
+
+            # Acknowledge immediately so the spinner clears on the phone.
+            try:
+                tg.answer_callback_query(callback_id)
+            except Exception:
+                pass  # not fatal
+
+            if ":" not in data:
+                continue
+
+            action_type, eid = data.split(":", 1)
+            mid_or_none: int | None = eid_to_mid.get(eid)
+            if mid_or_none is None:
+                continue
+            mid = mid_or_none
+
+            action_or_none: review.OpenAction | None = pending.get(mid)
+            if action_or_none is None:
+                continue
+            action = action_or_none
+
+            if action_type == "approve":
+                try:
+                    notion.push_todo(db_id, action, status="Approved")
+                    tg.edit_message_text(mid, f"✅ Added to Notion\n<i>{action.task}</i>")
+                    console.print(f"  [green]✅[/green] {action.task}")
+                except Exception as exc:
+                    tg.edit_message_text(mid, f"⚠️ Notion push failed: {exc}\n<i>{action.task}</i>")
+                    console.print(f"  [red]x[/red] {action.task}: {exc}")
+
+            elif action_type == "skip":
+                try:
+                    tg.edit_message_text(mid, f"❌ Skipped\n<i>{action.task}</i>")
+                except Exception:
+                    pass
+                console.print(f"  [dim]❌[/dim] {action.task}")
+
+            resolved += 1
+            del pending[mid]
+
+    if pending:
+        console.print(f"\n[yellow]{len(pending)} action(s) not resolved (timed out).[/yellow]")
+    else:
+        console.print(f"\n[bold]Done.[/bold] {total} action(s) processed.")
+
+
 _DEFAULT_TOML = """\
 # Eclipse configuration. Edit paths to taste.
+# Secrets (Telegram / Notion / HuggingFace tokens) live in .env, not here.
 
 # Point this at your cloud-synced recordings folder (Drive/OneDrive/Dropbox).
 inbox_dir = "inbox"
@@ -239,15 +498,34 @@ archive_dir = "archive"
 # keep | archive | delete  (what to do with audio after transcription)
 audio_retention = "keep"
 
-# Transcription (faster-whisper, CPU). Options: tiny.en small.en medium.en
+# Transcription (faster-whisper, CPU). Options: tiny.en base.en small.en medium.en
+# small.en (~1 GB) is the safe default on a 7.8 GB no-GPU box; medium.en is better
+# but heavier. Whisper is unloaded before the LLM runs, so peak RAM = max(whisper, llm).
 whisper_model = "small.en"
 whisper_compute_type = "int8"
+whisper_language = "en"
+whisper_beam_size = 5
+whisper_word_timestamps = false
 
 # Local LLM via Ollama
+enrich = true
 ollama_model = "llama3.2:3b"
+ollama_base_url = "http://localhost:11434"
+# Second LLM pass for missed commitments (costs time, not peak RAM).
+two_pass_extraction = true
+include_transcript_in_note = true
 
 # Names that mean "you" (for flagging your own action items)
 me_aliases = ["me", "I", "Tom"]
+
+# Notifications (Telegram) - needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env.
+telegram_enabled = false
+telegram_on_process = true
+
+# Speaker diarization (HEAVY - pyannote + torch, needs HF_TOKEN). Off by default;
+# this is the one feature that can strain a 7.8 GB box.
+diarize = false
+diarize_model = "pyannote/speaker-diarization-3.1"
 """
 
 

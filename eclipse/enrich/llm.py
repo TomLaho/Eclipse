@@ -52,7 +52,7 @@ class OllamaEnricher:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "qwen2.5:7b",
+        model: str = "llama3.2:3b",
         timeout: float = 600.0,
         two_pass: bool = True,
     ) -> None:
@@ -120,9 +120,7 @@ class OllamaEnricher:
         if len(transcript) <= _MAPREDUCE_THRESHOLD:
             return _trim(transcript)
 
-        chunks = [
-            transcript[i : i + _CHUNK_SIZE] for i in range(0, len(transcript), _CHUNK_SIZE)
-        ]
+        chunks = [transcript[i : i + _CHUNK_SIZE] for i in range(0, len(transcript), _CHUNK_SIZE)]
         log.info("mapreduce_condense", chars=len(transcript), chunks=len(chunks))
         condensed_parts = [
             self.chat(
@@ -137,11 +135,14 @@ class OllamaEnricher:
 
     def _merge_missed(self, transcript: str, insights: MeetingInsights) -> None:
         """Second pass: ask what was missed and merge new items in place."""
-        already = "\n".join(
-            [f"- action: {a.task}" for a in insights.action_items]
-            + [f"- decision: {d}" for d in insights.decisions]
-            + [f"- follow-up: {f}" for f in insights.follow_ups]
-        ) or "(nothing yet)"
+        already = (
+            "\n".join(
+                [f"- action: {a.task}" for a in insights.action_items]
+                + [f"- decision: {d}" for d in insights.decisions]
+                + [f"- follow-up: {f}" for f in insights.follow_ups]
+            )
+            or "(nothing yet)"
+        )
         prompt = SECOND_PASS_TEMPLATE.format(already=already, transcript=transcript)
         try:
             content = self._call(SECOND_PASS_SYSTEM, prompt)

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
 import frontmatter
 
-from eclipse.models import ActionItem, ProcessedMeeting
+from eclipse.models import ActionItem, ProcessedMeeting, Segment
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -31,6 +32,26 @@ def _format_action(item: ActionItem) -> str:
     if meta:
         line += " | " + " | ".join(meta)
     return line
+
+
+def _render_transcript_body(segments: list[Segment], fallback_text: str) -> str:
+    """Return speaker-grouped transcript text when diarization data is present.
+
+    If at least one segment carries a non-None speaker, consecutive segments from
+    the same speaker are grouped and rendered as ``**SPEAKER_XX:** text...``.
+    Otherwise the original flat ``fallback_text`` is returned unchanged.
+    """
+    if not any(s.speaker is not None for s in segments):
+        return fallback_text
+
+    lines: list[str] = []
+    for speaker, group in groupby(segments, key=lambda s: s.speaker):
+        combined = " ".join(seg.text.strip() for seg in group if seg.text.strip())
+        if not combined:
+            continue
+        label = speaker if speaker is not None else "UNKNOWN"
+        lines.append(f"**{label}:** {combined}")
+    return "\n\n".join(lines)
 
 
 def render_markdown(pm: ProcessedMeeting) -> str:
@@ -71,7 +92,8 @@ def render_markdown(pm: ProcessedMeeting) -> str:
         lines += ["## Attendees", ""] + [f"- {a}" for a in ins.attendees] + [""]
 
     if pm.transcript.text:
-        lines += ["---", "", "## Transcript", "", pm.transcript.text, ""]
+        transcript_body = _render_transcript_body(pm.transcript.segments, pm.transcript.text)
+        lines += ["---", "", "## Transcript", "", transcript_body, ""]
 
     post = frontmatter.Post("\n".join(lines))
     post.metadata = meta

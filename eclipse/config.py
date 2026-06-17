@@ -49,7 +49,7 @@ class Config(BaseSettings):
     # --- enrichment (Ollama, local LLM) ---
     enrich: bool = True
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "llama3.2:3b"
     ollama_timeout_sec: float = 600.0
     # second LLM pass that re-reads the transcript for missed commitments
     two_pass_extraction: bool = True

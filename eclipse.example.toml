@@ -1,4 +1,5 @@
 # Eclipse configuration. Copy to eclipse.toml (or run `eclipse init`) and edit.
+# Secrets (Telegram / Notion / HuggingFace tokens) live in .env, not here.
 
 # --- paths ---
 # Point inbox_dir at your cloud-synced recordings folder
@@ -15,14 +16,45 @@ audio_retention = "keep"
 
 # --- transcription (faster-whisper, runs on CPU) ---
 # Models, smallest/fastest first: tiny.en, base.en, small.en, medium.en
+# RAM guidance for a 7.8 GB no-GPU box: small.en is the safe default (~1 GB).
+# medium.en is noticeably better on names/numbers/accents but ~2 GB; it still
+# fits because Eclipse unloads Whisper before running the LLM (see pipeline).
 whisper_model = "small.en"
 whisper_compute_type = "int8"
 whisper_language = "en"
+whisper_beam_size = 5
+
+# Seed the decoder with proper nouns / jargon so they're spelled right.
+glossary = ["Kairo Analytics", "Eclipse"]
+# whisper_initial_prompt = "Extra context for the decoder."
+
+# Word-level timings. Needed for diarization; small extra cost otherwise.
+whisper_word_timestamps = false
 
 # --- enrichment (local LLM via Ollama) ---
 enrich = true
 ollama_model = "llama3.2:3b"
 ollama_base_url = "http://localhost:11434"
+ollama_timeout_sec = 600.0
+# Second LLM pass that re-reads the transcript for missed commitments.
+# Costs time, not peak RAM (same model, run again). Turn off to halve LLM time.
+two_pass_extraction = true
+
+# Include the full transcript at the bottom of each note.
+include_transcript_in_note = true
 
 # Names that mean "you", used to flag your own action items.
 me_aliases = ["me", "I", "Tom"]
+
+# --- notifications (Phase 2: Telegram) ---
+# Push a summary to Telegram as each meeting is filed. Requires TELEGRAM_BOT_TOKEN
+# and TELEGRAM_CHAT_ID in .env. Off by default.
+telegram_enabled = false
+telegram_on_process = true
+
+# --- diarization (Phase 4: optional, HEAVY) ---
+# "Who said what". Pulls in pyannote.audio + torch (uv sync --extra diarization)
+# and needs HF_TOKEN in .env. This is the one feature that can strain a 7.8 GB
+# box, so it's off by default. Enable only when you need speaker labels.
+diarize = false
+diarize_model = "pyannote/speaker-diarization-3.1"
