@@ -13,6 +13,7 @@ class ActionItem(BaseModel):
     task: str
     owner: str | None = None
     due: str | None = None  # free-text date as spoken, e.g. "Friday", "20/06"
+    due_iso: str | None = None  # resolved ISO date (YYYY-MM-DD), filled deterministically
 
     def is_mine(self, me_aliases: list[str]) -> bool:
         if self.owner is None:
@@ -34,12 +35,31 @@ class MeetingInsights(BaseModel):
     follow_ups: list[str] = Field(default_factory=list)
 
 
+class Word(BaseModel):
+    """A single word with timing, when ``word_timestamps`` is enabled."""
+
+    start: float
+    end: float
+    word: str
+
+
+class Segment(BaseModel):
+    """A transcript segment with timing (and, after diarization, a speaker)."""
+
+    start: float
+    end: float
+    text: str
+    words: list[Word] = Field(default_factory=list)
+    speaker: str | None = None  # filled by Phase-4 diarization, if enabled
+
+
 class TranscriptResult(BaseModel):
     """Raw output of the transcription step."""
 
     text: str
     language: str | None = None
     duration_sec: float = 0.0
+    segments: list[Segment] = Field(default_factory=list)
 
 
 class ProcessedMeeting(BaseModel):

@@ -16,6 +16,18 @@ dependencies = [
     "watchdog>=4.0",
     "python-frontmatter>=1.1",
     "platformdirs>=4.2",
+    "dateparser>=1.2",
+    "notion-client>=2.2",
+]
+
+[project.optional-dependencies]
+# Heavy ML stack for speaker diarization (Phase 4). Install with:
+#   uv sync --extra diarization
+# Requires a HuggingFace token (HF_TOKEN in .env) to download the pyannote model.
+diarization = [
+    "pyannote.audio>=3.1",
+    "torch>=2.2",
+    "torchaudio>=2.2",
 ]
 
 [project.scripts]
@@ -48,7 +60,16 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["faster_whisper.*", "frontmatter.*", "watchdog.*"]
+module = [
+    "faster_whisper.*",
+    "frontmatter.*",
+    "watchdog.*",
+    "dateparser.*",
+    "notion_client.*",
+    "pyannote.*",
+    "torch.*",
+    "torchaudio.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

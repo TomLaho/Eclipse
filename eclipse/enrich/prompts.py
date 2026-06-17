@@ -31,3 +31,38 @@ TRANSCRIPT:
 {transcript}
 \"\"\"
 """
+
+# --- second pass: catch what the first read missed -------------------------
+
+SECOND_PASS_SYSTEM = (
+    "You are double-checking a meeting transcript for items a first reader MISSED. "
+    "Look specifically for action items, commitments, decisions, risks, and follow-ups "
+    "that are NOT already in the provided list. Rules:\n"
+    "- Use ONLY information present in the transcript. Never invent anything.\n"
+    "- Do NOT repeat items already listed. Return only genuinely new ones.\n"
+    "- For each action item, set 'owner' to who is responsible and 'due' to any spoken deadline.\n"
+    "- Respond with a single JSON object: "
+    '{"action_items": [{"task","owner","due"}], "decisions": [], "follow_ups": []}. '
+    "Use empty lists if nothing was missed."
+)
+
+SECOND_PASS_TEMPLATE = """Already captured (do NOT repeat these):
+{already}
+
+Re-read the transcript and report ONLY items that were missed, as JSON.
+
+TRANSCRIPT:
+\"\"\"
+{transcript}
+\"\"\"
+"""
+
+# --- map-reduce for long meetings ------------------------------------------
+
+MAP_SYSTEM = (
+    "You compress a chunk of a meeting transcript without losing substance. "
+    "Preserve every commitment, decision, name, number, and date verbatim. "
+    "Write tight prose. No preamble, no commentary — just the condensed content."
+)
+
+MAP_TEMPLATE = "Condense this transcript chunk (part {part} of {total}):\n\n{chunk}"

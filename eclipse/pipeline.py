@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Literal
 
 from eclipse.config import Config
+from eclipse.enrich.dates import resolve_action_dates
 from eclipse.enrich.llm import OllamaEnricher
 from eclipse.ingest.registry import Registry, hash_file
 from eclipse.log import get_logger
-from eclipse.models import ProcessedMeeting
+from eclipse.models import ProcessedMeeting, TranscriptResult
 from eclipse.transcribe.whisper import Transcriber
 from eclipse.vault.writer import slugify, write_note
 
@@ -51,6 +52,16 @@ class PipelineResult:
     error: str | None = None
 
 
+@dataclass
+class _Transcribed:
+    """A file that has been transcribed and is waiting for the enrich stage."""
+
+    path: Path
+    file_hash: str
+    mtg_date: date
+    transcript: TranscriptResult
+
+
 class Pipeline:
     def __init__(
         self,
@@ -65,6 +76,35 @@ class Pipeline:
         self.registry = registry
 
     def process_file(self, path: Path) -> PipelineResult:
+        """Transcribe and enrich a single file (peak RAM = whisper + llm)."""
+        outcome = self._transcribe_stage(path)
+        if isinstance(outcome, PipelineResult):
+            return outcome
+        return self._enrich_and_write(outcome)
+
+    def process_batch(self, paths: list[Path]) -> list[PipelineResult]:
+        """Two-stage batch: transcribe all → release Whisper → enrich all.
+
+        On a low-RAM box this keeps peak memory at ``max(whisper, llm)`` instead
+        of their sum, which is what lets a large Whisper model and a 7-8B insight
+        model both fit (sequentially) in 7.8 GB.
+        """
+        results: list[PipelineResult] = []
+        transcribed: list[_Transcribed] = []
+        for path in paths:
+            outcome = self._transcribe_stage(path)
+            if isinstance(outcome, PipelineResult):
+                results.append(outcome)
+            else:
+                transcribed.append(outcome)
+
+        self.transcriber.unload()  # free Whisper before any LLM work
+
+        results.extend(self._enrich_and_write(t) for t in transcribed)
+        return results
+
+    def _transcribe_stage(self, path: Path) -> _Transcribed | PipelineResult:
+        """Stage 1: hash, dedupe, transcribe. Returns a result on skip/error."""
         try:
             file_hash = hash_file(path)
         except OSError as exc:
@@ -78,16 +118,30 @@ class Pipeline:
         try:
             mtg_date = meeting_date_for(path)
             transcript = self.transcriber.transcribe(path)
-            insights, enriched = self.enricher.enrich(transcript.text, mtg_date, path.name)
+            self._diarize(path, transcript)
+            return _Transcribed(path, file_hash, mtg_date, transcript)
+        except Exception as exc:
+            log.error("processing_failed", file=path.name, error=str(exc))
+            self._quarantine(path)
+            self.registry.record(file_hash, path.name, None, status="error")
+            return PipelineResult("error", path.name, error=str(exc))
+
+    def _enrich_and_write(self, t: _Transcribed) -> PipelineResult:
+        """Stage 2: enrich the transcript, write the note, apply retention."""
+        try:
+            insights, enriched = self.enricher.enrich(
+                t.transcript.text, t.mtg_date, t.path.name
+            )
+            resolve_action_dates(insights, t.mtg_date)
 
             audio_relpath = self._plan_audio_relpath(
-                insights.client, insights.title, mtg_date, path
+                insights.client, insights.title, t.mtg_date, t.path
             )
             pm = ProcessedMeeting(
-                source_name=path.name,
-                file_hash=file_hash,
-                meeting_date=mtg_date,
-                transcript=transcript,
+                source_name=t.path.name,
+                file_hash=t.file_hash,
+                meeting_date=t.mtg_date,
+                transcript=t.transcript,
                 insights=insights,
                 audio_relpath=audio_relpath,
                 transcribed_with=self.transcriber.descriptor(),
@@ -96,16 +150,38 @@ class Pipeline:
             )
 
             note_path = write_note(self.cfg.vault_dir, pm)
-            self._apply_retention(path, insights.client, insights.title, mtg_date)
-            self.registry.record(file_hash, path.name, str(note_path), status="complete")
-            log.info("written", file=path.name, note=note_path.name, enriched=enriched)
-            return PipelineResult("written", path.name, note_path=note_path)
+            self._apply_retention(t.path, insights.client, insights.title, t.mtg_date)
+            self.registry.record(t.file_hash, t.path.name, str(note_path), status="complete")
+            log.info("written", file=t.path.name, note=note_path.name, enriched=enriched)
+            self._notify(pm)
+            return PipelineResult("written", t.path.name, note_path=note_path)
 
         except Exception as exc:
-            log.error("processing_failed", file=path.name, error=str(exc))
-            self._quarantine(path)
-            self.registry.record(file_hash, path.name, None, status="error")
-            return PipelineResult("error", path.name, error=str(exc))
+            log.error("processing_failed", file=t.path.name, error=str(exc))
+            self._quarantine(t.path)
+            self.registry.record(t.file_hash, t.path.name, None, status="error")
+            return PipelineResult("error", t.path.name, error=str(exc))
+
+    # --- optional stages (diarization, notifications) ---
+
+    def _diarize(self, path: Path, transcript: TranscriptResult) -> None:
+        """Label transcript segments with speakers, if diarization is enabled."""
+        if not self.cfg.diarize:
+            return
+        from eclipse.transcribe.diarize import diarize_into
+
+        diarize_into(path, transcript, self.cfg.diarize_model)
+
+    def _notify(self, pm: ProcessedMeeting) -> None:
+        """Push a meeting summary to Telegram, if enabled. Never fatal."""
+        if not (self.cfg.telegram_enabled and self.cfg.telegram_on_process):
+            return
+        try:
+            from eclipse.notify.telegram import notify_meeting
+
+            notify_meeting(pm, self.cfg.me_aliases)
+        except Exception as exc:  # notification must never break the pipeline
+            log.warning("telegram_notify_failed", file=pm.source_name, error=str(exc))
 
     # --- audio retention helpers ---
 

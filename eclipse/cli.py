@@ -35,9 +35,20 @@ def _cfg(verbose: bool = False) -> Config:
 
 def _pipeline(cfg: Config, registry: Registry) -> Pipeline:
     transcriber = Transcriber(
-        cfg.whisper_model, cfg.whisper_device, cfg.whisper_compute_type, cfg.whisper_language
+        cfg.whisper_model,
+        cfg.whisper_device,
+        cfg.whisper_compute_type,
+        cfg.whisper_language,
+        beam_size=cfg.whisper_beam_size,
+        initial_prompt=cfg.effective_initial_prompt,
+        word_timestamps=cfg.whisper_word_timestamps or cfg.diarize,
     )
-    enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+    enricher = OllamaEnricher(
+        cfg.ollama_base_url,
+        cfg.ollama_model,
+        cfg.ollama_timeout_sec,
+        two_pass=cfg.two_pass_extraction,
+    )
     if cfg.enrich and not enricher.available():
         console.print(
             "[yellow]! Ollama not reachable - notes will be transcribed but not "
@@ -116,7 +127,7 @@ def run(
     console.print(f"Found {len(files)} file(s) in {cfg.inbox_dir}")
     with Registry(cfg.registry_path) as registry:
         pipeline = _pipeline(cfg, registry)
-        results = [pipeline.process_file(f) for f in files]
+        results = pipeline.process_batch(files)
     _summarize(results)
 
 

@@ -23,7 +23,10 @@ def _format_action(item: ActionItem) -> str:
     meta = []
     if item.owner:
         meta.append(f"**{item.owner}**")
-    if item.due:
+    if item.due_iso:
+        # resolved ISO date first (machine-friendly), spoken phrase in parens
+        meta.append(f"due: {item.due_iso} ({item.due})" if item.due else f"due: {item.due_iso}")
+    elif item.due:
         meta.append(f"due: {item.due}")
     if meta:
         line += " | " + " | ".join(meta)

@@ -34,21 +34,38 @@ class Config(BaseSettings):
     audio_subdir: str = "_audio"
 
     # --- transcription (faster-whisper, CPU) ---
-    whisper_model: str = "small.en"
+    # quality > speed: medium.en + beam 5 markedly improves names, numbers, accents.
+    whisper_model: str = "medium.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     whisper_language: str | None = "en"
+    whisper_beam_size: int = 5
+    # seeds Whisper's decoder so proper nouns are spelled right (client names, jargon)
+    glossary: list[str] = Field(default_factory=list)
+    whisper_initial_prompt: str | None = None
+    # word-level timings (needed for diarization); modest extra cost
+    whisper_word_timestamps: bool = False
 
     # --- enrichment (Ollama, local LLM) ---
     enrich: bool = True
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2:3b"
+    ollama_model: str = "qwen2.5:7b"
     ollama_timeout_sec: float = 600.0
+    # second LLM pass that re-reads the transcript for missed commitments
+    two_pass_extraction: bool = True
 
     # --- behaviour ---
     audio_retention: RetentionPolicy = "keep"
     me_aliases: list[str] = Field(default_factory=lambda: ["me", "I", "Tom"])
     include_transcript_in_note: bool = True
+
+    # --- notifications (Phase 2: Telegram) ---
+    telegram_enabled: bool = False
+    telegram_on_process: bool = True  # push a summary as each meeting is filed
+
+    # --- diarization (Phase 4: optional, heavy) ---
+    diarize: bool = False
+    diarize_model: str = "pyannote/speaker-diarization-3.1"
 
     @classmethod
     def settings_customise_sources(
@@ -70,6 +87,16 @@ class Config(BaseSettings):
     def audio_dir(self) -> Path:
         sub = Path(self.audio_subdir)
         return sub if sub.is_absolute() else self.vault_dir / sub
+
+    @property
+    def effective_initial_prompt(self) -> str | None:
+        """Combine the glossary and any explicit prompt into Whisper's seed text."""
+        parts: list[str] = []
+        if self.glossary:
+            parts.append("Terms that may come up: " + ", ".join(self.glossary) + ".")
+        if self.whisper_initial_prompt:
+            parts.append(self.whisper_initial_prompt)
+        return " ".join(parts) or None
 
     def resolve_paths(self) -> None:
         """Expand ``~`` and make all directory paths absolute."""
