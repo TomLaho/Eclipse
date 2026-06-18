@@ -11,6 +11,10 @@ def configure(verbose: bool = False) -> None:
     """Configure structlog for human-readable console output."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(format="%(message)s", level=level)
+    # httpx logs full request URLs at INFO — and the Telegram API puts the bot
+    # token in the URL. Keep these at WARNING so secrets never reach the logs.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(level),
         processors=[

@@ -6,11 +6,22 @@ Network and real tokens are never required — all API calls are monkeypatched.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
+import httpx
 import pytest
 
 from eclipse.models import ActionItem, MeetingInsights, ProcessedMeeting, TranscriptResult
-from eclipse.notify.telegram import TelegramClient, _build_message, notify_meeting
+from eclipse.notify.telegram import (
+    TelegramClient,
+    _build_message,
+    _dated_name,
+    _read_offset,
+    _write_offset,
+    extract_audio,
+    notify_meeting,
+    pull_audio,
+)
 from eclipse.secrets import Secrets
 
 
@@ -196,3 +207,137 @@ def test_notify_meeting_silent_on_send_error(
 
     # Must not raise.
     notify_meeting(_pm(), me_aliases=["Tom"])
+
+
+# ---------------------------------------------------------------------------
+# Inbound: extract_audio
+# ---------------------------------------------------------------------------
+
+# A fixed unix timestamp (2024-06-17) used to build update fixtures.
+_TS = 1_718_600_000
+
+
+def _msg(message_id: int = 1, **payload: object) -> dict[str, object]:
+    return {"update_id": message_id, "message": {"message_id": message_id, "date": _TS, **payload}}
+
+
+def test_extract_audio_handles_audio_file() -> None:
+    a = extract_audio(_msg(audio={"file_id": "A1", "file_name": "standup.m4a"}))
+    assert a is not None
+    assert a.file_id == "A1"
+    assert "standup.m4a" in a.file_name
+
+
+def test_extract_audio_handles_voice_note() -> None:
+    a = extract_audio(_msg(voice={"file_id": "V1"}))
+    assert a is not None
+    assert a.file_id == "V1"
+    assert a.file_name.endswith(".ogg")
+
+
+def test_extract_audio_document_by_mime() -> None:
+    doc = {"file_id": "D1", "file_name": "rec", "mime_type": "audio/mpeg"}
+    a = extract_audio(_msg(document=doc))
+    assert a is not None
+    assert a.file_id == "D1"
+
+
+def test_extract_audio_document_by_extension() -> None:
+    doc = {"file_id": "D2", "file_name": "rec.opus", "mime_type": "application/octet-stream"}
+    a = extract_audio(_msg(document=doc))
+    assert a is not None
+    assert a.file_id == "D2"
+
+
+def test_extract_audio_ignores_non_audio_document() -> None:
+    doc = {"file_id": "D3", "file_name": "report.pdf", "mime_type": "application/pdf"}
+    assert extract_audio(_msg(document=doc)) is None
+
+
+def test_extract_audio_ignores_text_message() -> None:
+    assert extract_audio(_msg(text="hello there")) is None
+
+
+def test_dated_name_prefixes_when_no_date() -> None:
+    assert _dated_name("standup.m4a", date(2026, 6, 18)) == "2026-06-18-standup.m4a"
+
+
+def test_dated_name_left_alone_when_date_present() -> None:
+    assert _dated_name("rec-2026-06-15.m4a", date(2026, 6, 18)) == "rec-2026-06-15.m4a"
+
+
+# ---------------------------------------------------------------------------
+# Offset persistence
+# ---------------------------------------------------------------------------
+
+
+def test_offset_roundtrip(tmp_path: Path) -> None:
+    state = tmp_path / "data" / "telegram_offset"
+    assert _read_offset(state) is None  # absent -> None
+    _write_offset(state, 42)
+    assert _read_offset(state) == 42
+
+
+# ---------------------------------------------------------------------------
+# pull_audio (fully monkeypatched client)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_audio_downloads_and_advances_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TelegramClient("tok", "123")
+    updates = [
+        _msg(10, document={"file_id": "F1", "file_name": "meeting.m4a", "mime_type": "audio/mp4"}),
+        _msg(11, text="not audio"),
+    ]
+    monkeypatch.setattr(client, "get_updates", lambda offset=None, timeout=30: updates)
+    monkeypatch.setattr(client, "get_file_path", lambda fid: f"path/{fid}")
+
+    def fake_dl(file_path: str, dest: Path) -> None:
+        dest.write_bytes(b"audio-bytes")
+
+    monkeypatch.setattr(client, "download_file", fake_dl)
+
+    inbox = tmp_path / "inbox"
+    state = tmp_path / "data" / "telegram_offset"
+    result = pull_audio(client, inbox, state)
+
+    assert len(result.saved) == 1
+    assert result.saved[0].read_bytes() == b"audio-bytes"
+    assert "meeting.m4a" in result.saved[0].name
+    assert result.skipped_too_big == []
+    assert _read_offset(state) == 12  # last update_id (11) + 1
+
+
+def test_pull_audio_reports_too_big(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TelegramClient("tok", "123")
+    updates = [_msg(5, audio={"file_id": "BIG", "file_name": "long.m4a"})]
+    monkeypatch.setattr(client, "get_updates", lambda offset=None, timeout=30: updates)
+
+    def too_big(file_id: str) -> str:
+        request = httpx.Request("POST", "https://api.telegram.org/botX/getFile")
+        response = httpx.Response(400, request=request, json={"description": "file is too big"})
+        raise httpx.HTTPStatusError("file is too big", request=request, response=response)
+
+    monkeypatch.setattr(client, "get_file_path", too_big)
+
+    result = pull_audio(client, tmp_path / "inbox", tmp_path / "offset")
+
+    assert result.saved == []
+    assert len(result.skipped_too_big) == 1
+    assert "long.m4a" in result.skipped_too_big[0]
+    assert _read_offset(tmp_path / "offset") == 6  # consumed despite skip
+
+
+def test_pull_audio_no_updates_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TelegramClient("tok", "123")
+    monkeypatch.setattr(client, "get_updates", lambda offset=None, timeout=30: [])
+    result = pull_audio(client, tmp_path / "inbox", tmp_path / "offset")
+    assert result.saved == []
+    assert result.skipped_too_big == []
+    assert _read_offset(tmp_path / "offset") is None  # nothing consumed -> no write

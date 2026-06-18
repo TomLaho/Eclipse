@@ -270,6 +270,55 @@ def telegram_test() -> None:
         raise typer.Exit(1) from exc
 
 
+@app.command(name="telegram-pull")
+def telegram_pull(
+    process: Annotated[
+        bool, typer.Option("--process", "-p", help="Process pulled files immediately")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Download new audio messages from your Telegram bot into the inbox."""
+    from eclipse.notify.telegram import TelegramClient, pull_audio
+
+    cfg = _cfg(verbose)
+    client = TelegramClient.from_secrets()
+    if client is None:
+        console.print(
+            "[red]Telegram not configured. "
+            "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env[/red]"
+        )
+        raise typer.Exit(1)
+
+    state_path = cfg.registry_path.parent / "telegram_offset"
+    try:
+        result = pull_audio(client, cfg.inbox_dir, state_path)
+    except Exception as exc:
+        console.print(f"[red]Telegram pull failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    for path in result.saved:
+        console.print(f"  [green]+[/green] {path.name}")
+    for name in result.skipped_too_big:
+        console.print(
+            f"  [yellow]![/yellow] {name} skipped (over Telegram's 20 MB bot limit "
+            "- record in Opus, or use Syncthing for large files)"
+        )
+
+    if not result.saved:
+        console.print("No new audio in Telegram.")
+        return
+
+    console.print(f"[bold]Pulled {len(result.saved)} file(s)[/bold] -> {cfg.inbox_dir}")
+
+    if process:
+        with Registry(cfg.registry_path) as registry:
+            pipeline = _pipeline(cfg, registry)
+            results = pipeline.process_batch(result.saved)
+        _summarize(results)
+    else:
+        console.print("Run [cyan]eclipse run[/cyan] to process them.")
+
+
 @app.command(name="notion-setup")
 def notion_setup(
     parent: Annotated[str, typer.Option("--parent", help="Notion page id to create the DB under")],

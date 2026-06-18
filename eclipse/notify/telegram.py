@@ -10,6 +10,9 @@ Public contract used by the pipeline:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,6 +24,8 @@ from eclipse.secrets import load_secrets
 log = get_logger("telegram")
 
 _API_BASE = "https://api.telegram.org/bot"
+# File downloads use a different host path: /file/bot<token>/<file_path>.
+_API_FILE_BASE = "https://api.telegram.org/file/bot"
 
 # Characters that must be escaped for Telegram HTML parse mode.
 _HTML_ESCAPE: dict[str, str] = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
@@ -118,6 +123,30 @@ class TelegramClient:
         resp.raise_for_status()
 
     # ------------------------------------------------------------------
+    # File download (inbound audio)
+    # ------------------------------------------------------------------
+
+    def get_file_path(self, file_id: str) -> str:
+        """Resolve a file_id to a downloadable file path (Telegram getFile).
+
+        Raises ``httpx.HTTPStatusError`` when Telegram won't serve the file —
+        notably a 400 ("file is too big") for anything over the 20 MB bot limit.
+        """
+        resp = self._http.post(f"{self._base}/getFile", json={"file_id": file_id})
+        resp.raise_for_status()
+        data: dict[str, Any] = resp.json()
+        return str(data["result"]["file_path"])
+
+    def download_file(self, file_path: str, dest: Path) -> None:
+        """Stream a Telegram file to *dest* on disk."""
+        url = f"{_API_FILE_BASE}{self._token}/{file_path}"
+        with self._http.stream("GET", url, timeout=120.0) as resp:
+            resp.raise_for_status()
+            with dest.open("wb") as fh:
+                for chunk in resp.iter_bytes():
+                    fh.write(chunk)
+
+    # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
 
@@ -176,3 +205,150 @@ def notify_meeting(pm: ProcessedMeeting, me_aliases: list[str]) -> None:
         client.send_message(text)
     except Exception as exc:
         log.warning("telegram_send_failed", error=str(exc))
+
+
+# ------------------------------------------------------------------
+# Inbound: pull audio messages into the inbox (phone -> PC transfer)
+# ------------------------------------------------------------------
+
+# Audio/video container extensions Eclipse accepts when shared as a document.
+_AUDIO_EXTS = {
+    ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".oga", ".opus",
+    ".flac", ".mp4", ".m4b", ".amr", ".3gp", ".webm", ".mkv",
+}
+# A YYYY-MM-DD-ish date already present in a filename (so we don't double-date).
+_DATE_IN_NAME_RE = re.compile(r"20\d{2}[-_]?\d{2}[-_]?\d{2}")
+
+
+@dataclass
+class TelegramAudio:
+    """An audio attachment found in a Telegram update."""
+
+    file_id: str
+    file_name: str
+    message_id: int
+
+
+@dataclass
+class PullResult:
+    """Outcome of a single ``pull_audio`` run."""
+
+    saved: list[Path]
+    skipped_too_big: list[str]
+
+
+def _dated_name(name: str, msg_date: date) -> str:
+    """Prefix *name* with the message date unless it already carries one.
+
+    Lets the pipeline date the meeting from when it was sent rather than the
+    download time, while preserving any explicit date in the original filename.
+    """
+    if _DATE_IN_NAME_RE.search(name):
+        return name
+    return f"{msg_date.isoformat()}-{name}"
+
+
+def extract_audio(update: dict[str, Any]) -> TelegramAudio | None:
+    """Return the audio attachment in *update*, or None if it carries none.
+
+    Handles voice notes, audio files, audio/video documents, and videos.
+    """
+    msg = update.get("message") or update.get("channel_post")
+    if not msg:
+        return None
+
+    message_id = int(msg.get("message_id", 0))
+    msg_date = datetime.fromtimestamp(msg.get("date", 0)).date()
+
+    audio = msg.get("audio")
+    if audio:
+        name = audio.get("file_name") or f"telegram-audio-{message_id}.m4a"
+        return TelegramAudio(audio["file_id"], _dated_name(name, msg_date), message_id)
+
+    voice = msg.get("voice")
+    if voice:
+        name = f"telegram-voice-{message_id}.ogg"
+        return TelegramAudio(voice["file_id"], _dated_name(name, msg_date), message_id)
+
+    doc = msg.get("document")
+    if doc:
+        name = doc.get("file_name", "")
+        mime = doc.get("mime_type", "")
+        if mime.startswith(("audio/", "video/")) or Path(name).suffix.lower() in _AUDIO_EXTS:
+            name = name or f"telegram-doc-{message_id}.bin"
+            return TelegramAudio(doc["file_id"], _dated_name(name, msg_date), message_id)
+
+    video = msg.get("video")
+    if video:
+        name = video.get("file_name") or f"telegram-video-{message_id}.mp4"
+        return TelegramAudio(video["file_id"], _dated_name(name, msg_date), message_id)
+
+    return None
+
+
+def _read_offset(state_path: Path) -> int | None:
+    try:
+        return int(state_path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_offset(state_path: Path, offset: int) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(str(offset), encoding="utf-8")
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    n = 2
+    while (cand := parent / f"{stem}-{n}{suffix}").exists():
+        n += 1
+    return cand
+
+
+def pull_audio(client: TelegramClient, inbox: Path, state_path: Path) -> PullResult:
+    """Download new audio messages from Telegram into *inbox*.
+
+    Tracks the last consumed ``update_id`` in *state_path* so each message is
+    pulled exactly once. Files Telegram refuses to serve (the bot API caps
+    downloads at 20 MB) are reported in ``skipped_too_big`` rather than raising.
+    A download that fails mid-stream leaves the offset un-advanced so the message
+    is retried on the next run.
+    """
+    offset = _read_offset(state_path)
+    updates = client.get_updates(offset=offset, timeout=0)
+
+    saved: list[Path] = []
+    skipped_too_big: list[str] = []
+    last_offset: int | None = offset
+
+    for update in updates:
+        update_id = int(update["update_id"])
+        audio = extract_audio(update)
+        if audio is not None:
+            try:
+                file_path = client.get_file_path(audio.file_id)
+            except httpx.HTTPStatusError as exc:
+                # Retrying won't help (file stays too big), so treat as consumed.
+                log.warning("telegram_file_unavailable", name=audio.file_name, error=str(exc))
+                skipped_too_big.append(audio.file_name)
+            else:
+                inbox.mkdir(parents=True, exist_ok=True)
+                dest = _unique_path(inbox / audio.file_name)
+                try:
+                    client.download_file(file_path, dest)
+                except Exception as exc:
+                    dest.unlink(missing_ok=True)  # drop any partial file
+                    log.warning("telegram_download_failed", name=audio.file_name, error=str(exc))
+                    break  # leave offset un-advanced; retry this message next run
+                log.info("telegram_audio_pulled", name=dest.name)
+                saved.append(dest)
+
+        last_offset = update_id + 1  # this update is fully handled
+
+    if last_offset is not None and last_offset != offset:
+        _write_offset(state_path, last_offset)
+
+    return PullResult(saved=saved, skipped_too_big=skipped_too_big)
