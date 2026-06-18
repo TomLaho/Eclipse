@@ -3,8 +3,9 @@ from pathlib import Path
 
 from eclipse.config import Config
 from eclipse.ingest.registry import Registry
-from eclipse.models import ActionItem, MeetingInsights, TranscriptResult
-from eclipse.pipeline import Pipeline, meeting_date_for
+from eclipse.models import ActionItem, MeetingInsights, ProcessedMeeting, TranscriptResult
+from eclipse.pipeline import Pipeline, meeting_date_for, reenrich_note
+from eclipse.vault.writer import write_note
 
 
 class FakeTranscriber:
@@ -106,3 +107,33 @@ def test_failure_is_quarantined(tmp_path: Path) -> None:
     assert result.status == "error"
     assert not f.exists()
     assert len(list((cfg.archive_dir / "_failed").glob("*"))) == 1
+
+
+def test_reenrich_note_rewrites_from_transcript(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    # Start from an unenriched note that still carries its transcript.
+    pm = ProcessedMeeting(
+        source_name="rec.m4a",
+        file_hash="hash123",
+        meeting_date=date(2026, 6, 17),
+        transcript=TranscriptResult(text="we agreed Tom will send the deck", duration_sec=120.0),
+        insights=MeetingInsights(
+            title="Raw", summary="raw snippet", client="General", tags=["unenriched"]
+        ),
+        audio_relpath="_audio/2026-06-17-raw.m4a",
+        transcribed_with="faster-whisper/small.en",
+        enriched_with="(fallback)",
+        enriched=False,
+    )
+    old_path = write_note(cfg.vault_dir, pm)
+    assert old_path.exists()
+
+    new_path, enriched = reenrich_note(cfg, FakeEnricher(), old_path)  # type: ignore[arg-type]
+
+    assert enriched is True
+    assert new_path.exists()
+    assert not old_path.exists()  # client/title changed -> old note removed
+    text = new_path.read_text(encoding="utf-8")
+    assert "Do thing" in text  # action item from enrichment
+    assert "we agreed Tom will send the deck" in text  # transcript preserved
+    assert "status: complete" in text

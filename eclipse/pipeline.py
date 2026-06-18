@@ -225,3 +225,47 @@ class Pipeline:
             shutil.move(str(path), str(_unique(failed / path.name)))
         except OSError as exc:
             log.warning("quarantine_failed", file=path.name, error=str(exc))
+
+
+_TRANSCRIPT_HEADING = "## Transcript"
+
+
+def reenrich_note(cfg: Config, enricher: OllamaEnricher, note_path: Path) -> tuple[Path, bool]:
+    """Re-run LLM enrichment on an existing note's transcript, no re-transcription.
+
+    Reads the transcript and metadata back out of the note, re-enriches, and
+    rewrites the note (removing the old file if the client/title changed its
+    path). Returns ``(new_path, enriched)``.
+    """
+    import frontmatter
+
+    post = frontmatter.load(str(note_path))
+    meta = post.metadata
+    idx = post.content.find(_TRANSCRIPT_HEADING)
+    transcript_text = post.content[idx + len(_TRANSCRIPT_HEADING) :].strip() if idx != -1 else ""
+    if not transcript_text:
+        raise ValueError(f"No transcript section found in {note_path.name}")
+
+    mtg_date = date.fromisoformat(str(meta["date"]))
+    source_name = Path(str(meta.get("source_audio") or note_path.stem)).name
+    duration_sec = float(str(meta.get("duration_min", 0.0) or 0.0)) * 60.0
+
+    insights, enriched = enricher.enrich(transcript_text, mtg_date, source_name)
+    resolve_action_dates(insights, mtg_date)
+
+    pm = ProcessedMeeting(
+        source_name=source_name,
+        file_hash=str(meta.get("eclipse_hash", "")),
+        meeting_date=mtg_date,
+        transcript=TranscriptResult(text=transcript_text, duration_sec=duration_sec),
+        insights=insights,
+        audio_relpath=meta.get("source_audio"),
+        transcribed_with=str(meta.get("transcribed_with", "")),
+        enriched_with=enricher.descriptor() if enriched else "(fallback)",
+        enriched=enriched,
+    )
+
+    # Remove the old note first so an unchanged path doesn't collide into "-2".
+    note_path.unlink(missing_ok=True)
+    new_path = write_note(cfg.vault_dir, pm)
+    return new_path, enriched

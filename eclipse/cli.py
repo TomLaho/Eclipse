@@ -234,6 +234,35 @@ def digest(
 
 
 @app.command()
+def reenrich(
+    note: Annotated[Path, typer.Argument(help="Path to a note .md to re-enrich")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Re-run LLM enrichment on an existing note's transcript (no re-transcription)."""
+    from eclipse.pipeline import reenrich_note
+
+    cfg = _cfg(verbose)
+    if not note.exists():
+        console.print(f"[red]No such note:[/red] {note}")
+        raise typer.Exit(1)
+    enricher = OllamaEnricher(
+        cfg.ollama_base_url,
+        cfg.ollama_model,
+        cfg.ollama_timeout_sec,
+        two_pass=cfg.two_pass_extraction,
+    )
+    if not enricher.available():
+        console.print("[red]Ollama not reachable. Start it with `ollama serve`.[/red]")
+        raise typer.Exit(1)
+
+    new_path, enriched = reenrich_note(cfg, enricher, note)
+    if enriched:
+        console.print(f"[green]Re-enriched[/green] -> {new_path}")
+    else:
+        console.print(f"[yellow]LLM failed; wrote fallback[/yellow] -> {new_path}")
+
+
+@app.command()
 def ask(
     question: Annotated[str, typer.Argument(help="A question about your meetings")],
 ) -> None:

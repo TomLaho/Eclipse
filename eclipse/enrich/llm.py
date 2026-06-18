@@ -25,8 +25,15 @@ log = get_logger("enrich")
 # Keep the prompt within a small local model's context window on a low-RAM machine.
 _TRANSCRIPT_BUDGET = 9000
 # Above this, map-reduce (chunk -> condense -> merge) instead of head/tail trimming.
-_MAPREDUCE_THRESHOLD = 14000
+# Set high deliberately: map-reduce fires N sequential LLM calls, and on a slow
+# CPU box (~1-3 tok/s) each call can exceed the request timeout. Single-pass
+# head/tail trimming keeps normal meetings (up to ~75 min) to one call; only
+# genuinely huge transcripts fall back to map-reduce.
+_MAPREDUCE_THRESHOLD = 30000
 _CHUNK_SIZE = 6000
+# Context window: 4096 comfortably fits a 9k-char transcript + output and is
+# markedly faster to allocate/process on CPU than 8192.
+_NUM_CTX = 4096
 
 
 _LEADING_DATE = re.compile(r"^20\d{2}[-_]?\d{2}[-_]?\d{2}[-_ ]*")
@@ -168,7 +175,7 @@ class OllamaEnricher:
             ],
             "stream": False,
             "keep_alive": "10m",
-            "options": {"temperature": temperature, "num_ctx": 8192, "num_predict": 1000},
+            "options": {"temperature": temperature, "num_ctx": _NUM_CTX, "num_predict": 1000},
         }
         resp = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
         resp.raise_for_status()
@@ -186,7 +193,7 @@ class OllamaEnricher:
             "stream": False,
             "format": "json",
             "keep_alive": "10m",
-            "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 800},
+            "options": {"temperature": 0.1, "num_ctx": _NUM_CTX, "num_predict": 800},
         }
         resp = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
         resp.raise_for_status()
