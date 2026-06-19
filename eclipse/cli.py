@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+if TYPE_CHECKING:
+    # Annotation-only; the runtime imports stay lazy inside approve() so the CLI
+    # doesn't pull in notion_client unless the approval flow is actually used.
+    from eclipse.notify.notion import NotionTodos
+    from eclipse.notify.telegram import TelegramClient
+
 from eclipse import __version__, log, review
 from eclipse.config import Config, load_config
 from eclipse.enrich.llm import OllamaEnricher
 from eclipse.ingest.registry import Registry
-from eclipse.ingest.watcher import scan_inbox, wait_until_stable, watch
+from eclipse.ingest.watcher import scan_inbox, watch
 from eclipse.pipeline import Pipeline, PipelineResult
 from eclipse.transcribe.whisper import Transcriber
 
@@ -163,8 +169,9 @@ def watch_cmd(  # registered below as `eclipse watch`
             pipeline.process_file(f)
 
         def handler(path: Path) -> None:
-            if wait_until_stable(path):
-                pipeline.process_file(path)
+            # The watcher only invokes this for files that have already settled,
+            # so there's no need to wait again here.
+            pipeline.process_file(path)
 
         console.print(f"[bold]Watching[/bold] {cfg.inbox_dir} (Ctrl-C to stop)")
         try:
@@ -210,7 +217,7 @@ def digest(
     """Roll up every open action item across the vault into a digest note."""
     cfg = _cfg()
     body = review.build_digest(cfg, with_briefing=not no_briefing)
-    path = review.write_digest(cfg, with_briefing=not no_briefing)
+    path = review.write_digest(cfg, with_briefing=not no_briefing, body=body)
     open_count = len(review.collect_open_actions(cfg.vault_dir))
     console.print(f"[green]Digest written[/green] -> {path}")
     console.print(f"{open_count} open action item(s) across the vault.")
@@ -413,6 +420,125 @@ def notion_push(
     console.print(f"\n[bold]Done.[/bold] {pushed} pushed, {skipped} skipped.")
 
 
+def _send_approval_requests(
+    tg: TelegramClient, actions: list[review.OpenAction]
+) -> tuple[dict[int, review.OpenAction], dict[str, int]]:
+    """Send one approve/skip message per action.
+
+    Returns ``(pending, eid_to_mid)`` — pending maps the sent message id to its
+    action, eid_to_mid maps each action's eclipse_id back to that message id
+    (callbacks carry the eclipse_id, the loop needs the message id).
+    """
+    from eclipse.notify.notion import eclipse_id
+
+    pending: dict[int, review.OpenAction] = {}
+    eid_to_mid: dict[str, int] = {}
+    for action in actions:
+        eid = eclipse_id(action)
+        text = (
+            f"<b>{action.task}</b>\n"
+            f"Client: {action.client}  |  Meeting: {action.meeting_title}"
+            + (f"  |  Due: {action.due}" if action.due else "")
+        )
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve", "callback_data": f"approve:{eid}"},
+                    {"text": "❌ Skip", "callback_data": f"skip:{eid}"},
+                ]
+            ]
+        }
+        try:
+            mid = tg.send_message(text, reply_markup=markup)
+        except Exception as exc:
+            console.print(f"[red]Failed to send action to Telegram:[/red] {exc}")
+            continue
+        pending[mid] = action
+        eid_to_mid[eid] = mid
+    return pending, eid_to_mid
+
+
+def _collect_approvals(
+    tg: TelegramClient,
+    notion: NotionTodos,
+    db_id: str,
+    pending: dict[int, review.OpenAction],
+    eid_to_mid: dict[str, int],
+) -> None:
+    """Long-poll Telegram, push approved actions to Notion until all are resolved.
+
+    Each callback's data is ``"approve:<eid>"`` / ``"skip:<eid>"``. We match the
+    eid back to a pending message id and act on it. Stops when everything is
+    resolved or after ~90s idle (3 polls x 30s timeout).
+    """
+    resolved = 0
+    total = len(pending)
+    update_offset: int | None = None
+    idle_polls = 0
+    max_idle_polls = 3
+
+    while resolved < total and idle_polls < max_idle_polls:
+        try:
+            updates = tg.get_updates(offset=update_offset, timeout=30)
+        except Exception as exc:
+            console.print(f"[yellow]Poll error (will retry):[/yellow] {exc}")
+            idle_polls += 1
+            continue
+
+        if not updates:
+            idle_polls += 1
+            continue
+
+        idle_polls = 0  # reset on any activity
+
+        for update in updates:
+            # Advance the offset so we don't re-process the same update.
+            update_offset = update["update_id"] + 1
+
+            cb = update.get("callback_query")
+            if not cb:
+                continue
+
+            # Acknowledge immediately so the spinner clears on the phone.
+            try:
+                tg.answer_callback_query(cb.get("id", ""))
+            except Exception:
+                pass  # not fatal
+
+            data: str = cb.get("data", "")
+            if ":" not in data:
+                continue
+            action_type, eid = data.split(":", 1)
+
+            mid = eid_to_mid.get(eid)
+            action = pending.get(mid) if mid is not None else None
+            if mid is None or action is None:
+                continue
+
+            if action_type == "approve":
+                try:
+                    notion.push_todo(db_id, action, status="Approved")
+                    tg.edit_message_text(mid, f"✅ Added to Notion\n<i>{action.task}</i>")
+                    console.print(f"  [green]✅[/green] {action.task}")
+                except Exception as exc:
+                    tg.edit_message_text(mid, f"⚠️ Notion push failed: {exc}\n<i>{action.task}</i>")
+                    console.print(f"  [red]x[/red] {action.task}: {exc}")
+            elif action_type == "skip":
+                try:
+                    tg.edit_message_text(mid, f"❌ Skipped\n<i>{action.task}</i>")
+                except Exception:
+                    pass
+                console.print(f"  [dim]❌[/dim] {action.task}")
+
+            resolved += 1
+            del pending[mid]
+
+    if pending:
+        console.print(f"\n[yellow]{len(pending)} action(s) not resolved (timed out).[/yellow]")
+    else:
+        console.print(f"\n[bold]Done.[/bold] {total} action(s) processed.")
+
+
 @app.command()
 def approve() -> None:
     """Interactively approve open actions via Telegram inline buttons → push to Notion."""
@@ -445,123 +571,10 @@ def approve() -> None:
         return
 
     console.print(f"Sending {len(actions)} action(s) to Telegram for approval…")
-
-    # --- State machine ---
-    # Each action gets one Telegram message with [✅ Approve] [❌ Skip] buttons.
-    # We long-poll get_updates and match callback_query.data to pending message ids.
-    # When all are resolved (or we time out after ~90s idle) we stop.
-
-    # Map: message_id -> OpenAction
-    pending: dict[int, review.OpenAction] = {}
-
-    for action in actions:
-        from eclipse.notify.notion import eclipse_id
-
-        eid = eclipse_id(action)
-        text = (
-            f"<b>{action.task}</b>\n"
-            f"Client: {action.client}  |  Meeting: {action.meeting_title}"
-            + (f"  |  Due: {action.due}" if action.due else "")
-        )
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ Approve", "callback_data": f"approve:{eid}"},
-                    {"text": "❌ Skip", "callback_data": f"skip:{eid}"},
-                ]
-            ]
-        }
-        try:
-            mid = tg.send_message(text, reply_markup=markup)
-            pending[mid] = action
-        except Exception as exc:
-            console.print(f"[red]Failed to send action to Telegram:[/red] {exc}")
-
+    pending, eid_to_mid = _send_approval_requests(tg, actions)
     if not pending:
         return
-
-    # Build a reverse map: eclipse_id -> message_id
-    eid_to_mid: dict[str, int] = {}
-    for mid, action in pending.items():
-        from eclipse.notify.notion import eclipse_id
-
-        eid_to_mid[eclipse_id(action)] = mid
-
-    resolved = 0
-    total = len(pending)
-    update_offset: int | None = None
-    # Allow up to ~90 seconds of idle time (3 polls x 30s timeout) before giving up.
-    idle_polls = 0
-    max_idle_polls = 3
-
-    while resolved < total and idle_polls < max_idle_polls:
-        try:
-            updates = tg.get_updates(offset=update_offset, timeout=30)
-        except Exception as exc:
-            console.print(f"[yellow]Poll error (will retry):[/yellow] {exc}")
-            idle_polls += 1
-            continue
-
-        if not updates:
-            idle_polls += 1
-            continue
-
-        idle_polls = 0  # reset on any activity
-
-        for update in updates:
-            # Advance the offset so we don't re-process the same update.
-            update_offset = update["update_id"] + 1
-
-            cb = update.get("callback_query")
-            if not cb:
-                continue
-
-            callback_id: str = cb.get("id", "")
-            data: str = cb.get("data", "")
-
-            # Acknowledge immediately so the spinner clears on the phone.
-            try:
-                tg.answer_callback_query(callback_id)
-            except Exception:
-                pass  # not fatal
-
-            if ":" not in data:
-                continue
-
-            action_type, eid = data.split(":", 1)
-            mid_or_none: int | None = eid_to_mid.get(eid)
-            if mid_or_none is None:
-                continue
-            mid = mid_or_none
-
-            action_or_none: review.OpenAction | None = pending.get(mid)
-            if action_or_none is None:
-                continue
-            action = action_or_none
-
-            if action_type == "approve":
-                try:
-                    notion.push_todo(db_id, action, status="Approved")
-                    tg.edit_message_text(mid, f"✅ Added to Notion\n<i>{action.task}</i>")
-                    console.print(f"  [green]✅[/green] {action.task}")
-                except Exception as exc:
-                    tg.edit_message_text(mid, f"⚠️ Notion push failed: {exc}\n<i>{action.task}</i>")
-                    console.print(f"  [red]x[/red] {action.task}: {exc}")
-
-            elif action_type == "skip":
-                try:
-                    tg.edit_message_text(mid, f"❌ Skipped\n<i>{action.task}</i>")
-                except Exception:
-                    pass
-                console.print(f"  [dim]❌[/dim] {action.task}")
-
-            resolved += 1
-            del pending[mid]
-
-    if pending:
-        console.print(f"\n[yellow]{len(pending)} action(s) not resolved (timed out).[/yellow]")
-    else:
-        console.print(f"\n[bold]Done.[/bold] {total} action(s) processed.")
+    _collect_approvals(tg, notion, db_id, pending, eid_to_mid)
 
 
 _DEFAULT_TOML = """\

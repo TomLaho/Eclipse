@@ -219,13 +219,17 @@ def build_digest(cfg: Config, with_briefing: bool = True) -> str:
     return "\n".join(lines)
 
 
-def write_digest(cfg: Config, with_briefing: bool = True) -> Path:
+def write_digest(cfg: Config, with_briefing: bool = True, body: str | None = None) -> Path:
     from datetime import date as _date
 
+    # Reuse a pre-built body when the caller already has one — building it again
+    # re-runs the LLM briefing, which is a multi-minute call on a slow CPU box.
+    if body is None:
+        body = build_digest(cfg, with_briefing=with_briefing)
     out_dir = cfg.vault_dir / "_digests"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{_date.today().isoformat()}-digest.md"
-    path.write_text(build_digest(cfg, with_briefing=with_briefing), encoding="utf-8")
+    path.write_text(body, encoding="utf-8")
     return path
 
 

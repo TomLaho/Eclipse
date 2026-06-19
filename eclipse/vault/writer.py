@@ -73,7 +73,9 @@ def render_markdown(pm: ProcessedMeeting) -> str:
     }
 
     lines: list[str] = [f"# {ins.title}", ""]
-    lines += ["> [!summary] Summary", f"> {ins.summary}", ""]
+    # Prefix every line so a multi-line summary stays inside the callout block.
+    summary_lines = [f"> {ln}" for ln in (ins.summary.splitlines() or [""])]
+    lines += ["> [!summary] Summary", *summary_lines, ""]
 
     lines += ["## Action items", ""]
     if ins.action_items:

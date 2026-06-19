@@ -48,7 +48,7 @@ Pipeline: `inbox → transcribe (faster-whisper) → enrich (Ollama) → vault n
 
 - Python 3.13, `uv`, **mypy strict**, **ruff** (check + format), **pytest**. pydantic v2,
   typer, structlog, httpx, faster-whisper, watchdog, python-frontmatter.
-- 19 tests, all green; `uv run pytest -q` is the gate. mypy/ruff clean.
+- 80+ tests, all green; `uv run pytest -q` is the gate. mypy/ruff clean.
 - Engine is tested with mocked transcriber/enricher — tests need no models or network.
 - `vault/ inbox/ archive/ data/ *.sqlite eclipse.toml` are git-ignored (meeting content
   never committed). Commit `eclipse.example.toml`.
@@ -67,13 +67,16 @@ uv run eclipse status               # readiness + storage
 uv run pytest -q && uv run ruff check . && uv run mypy eclipse
 ```
 
+## Built since v1 (now shipped)
+
+- Speaker diarization (`diarize.py`, optional `[diarization]` extra; off by default, heavy).
+- Notion todo push (`notion-push` + interactive `approve` via Telegram inline buttons).
+- Telegram notifications + `telegram-pull` (phone → inbox transfer).
+- Map-reduce enrichment for very long meetings (`llm._condense`, >30k chars).
+
 ## What's next (not yet built)
 
-- Speaker diarization ("who said what") — heavier on RAM, optional.
-- Notion todo push (draft → approve → push). `todos` already drafts the approval file;
-  the push needs a Notion token + DB id.
 - Semantic search via local embeddings for large vaults (current `ask` feeds compact
   per-meeting summaries; fine for tens-to-low-hundreds of meetings).
 - Optional local web dashboard (Tom chose Obsidian for v1).
-- Map-reduce enrichment for very long meetings (current transcript trim ~9k chars).
 ```

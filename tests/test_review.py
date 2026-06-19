@@ -58,6 +58,28 @@ def test_build_digest_is_deterministic_without_llm(
     assert "### Acme" in md
 
 
+def test_write_digest_reuses_body_without_rebuilding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a body is supplied, write_digest must not call build_digest again
+    (rebuilding re-runs the LLM briefing — a multi-minute call on a slow box)."""
+    _seed(tmp_path)
+    cfg = Config(vault_dir=tmp_path, me_aliases=["Tom"])
+    cfg.resolve_paths()
+
+    calls = {"n": 0}
+    real_build = review.build_digest
+
+    def counting_build(*args: object, **kwargs: object) -> str:
+        calls["n"] += 1
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(review, "build_digest", counting_build)
+    path = review.write_digest(cfg, body="PREBUILT BODY")
+    assert calls["n"] == 0
+    assert path.read_text(encoding="utf-8") == "PREBUILT BODY"
+
+
 def test_completed_items_are_not_open(tmp_path: Path) -> None:
     _seed(tmp_path)
     note = next(iter(review.iter_notes(tmp_path))).path

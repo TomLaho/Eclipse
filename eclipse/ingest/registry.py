@@ -43,7 +43,11 @@ class Registry:
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path)
+        # check_same_thread=False: `eclipse watch` dispatches file events on
+        # watchdog's background thread, so the connection (created here on the
+        # main thread) is used from another thread. Access is still serial — the
+        # watcher handles one settled file at a time — so no locking is needed.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA)
         self._conn.commit()
