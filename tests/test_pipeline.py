@@ -45,6 +45,7 @@ def _cfg(tmp_path: Path, retention: str = "keep") -> Config:
         archive_dir=tmp_path / "archive",
         registry_path=tmp_path / "data" / "r.sqlite",
         audio_retention=retention,  # type: ignore[arg-type]
+        telegram_enabled=False,  # don't inherit the dev's eclipse.toml in tests
     )
     c.resolve_paths()
     c.ensure_dirs()
@@ -128,9 +129,9 @@ def test_reenrich_note_rewrites_from_transcript(tmp_path: Path) -> None:
     old_path = write_note(cfg.vault_dir, pm)
     assert old_path.exists()
 
-    new_path, enriched = reenrich_note(cfg, FakeEnricher(), old_path)  # type: ignore[arg-type]
+    new_path, pm_out = reenrich_note(cfg, FakeEnricher(), old_path)  # type: ignore[arg-type]
 
-    assert enriched is True
+    assert pm_out.enriched is True
     assert new_path.exists()
     assert not old_path.exists()  # client/title changed -> old note removed
     text = new_path.read_text(encoding="utf-8")
