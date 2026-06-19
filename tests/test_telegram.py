@@ -31,6 +31,8 @@ def _pm(
     client: str = "Acme",
     action_items: list[ActionItem] | None = None,
     meeting_date: date = date(2026, 6, 17),
+    missed_items: list[str] | None = None,
+    enriched: bool = True,
 ) -> ProcessedMeeting:
     return ProcessedMeeting(
         source_name="test.m4a",
@@ -42,7 +44,9 @@ def _pm(
             summary=summary,
             client=client,
             action_items=action_items or [],
+            missed_items=missed_items or [],
         ),
+        enriched=enriched,
     )
 
 
@@ -104,11 +108,47 @@ def test_build_message_no_action_items_section_when_empty() -> None:
     assert "Action items" not in text
 
 
+def test_build_message_lists_missed_items() -> None:
+    pm = _pm(missed_items=["Get Jake & Dan sign-off by Monday (Tom)"])
+    text = _build_message(pm, me_aliases=["Tom"])
+    assert "You may have missed" in text
+    assert "Get Jake &amp; Dan sign-off by Monday (Tom)" in text  # & escaped
+
+
+def test_build_message_reassures_when_enriched_but_nothing_missed() -> None:
+    pm = _pm(missed_items=[])  # enriched True by default
+    text = _build_message(pm, me_aliases=["Tom"])
+    assert "Nothing extra flagged" in text
+
+
+def test_build_message_no_missed_section_when_not_enriched() -> None:
+    pm = _pm(missed_items=[], enriched=False)
+    text = _build_message(pm, me_aliases=["Tom"])
+    assert "You may have missed" not in text
+    assert "Nothing extra flagged" not in text
+
+
 def test_build_message_action_item_due_shown() -> None:
     items = [ActionItem(task="Update slides", owner="Tom", due="2026-06-20")]
     pm = _pm(action_items=items)
     text = _build_message(pm, me_aliases=["Tom"])
     assert "2026-06-20" in text
+
+
+def test_build_message_action_task_is_bold_with_detail() -> None:
+    items = [
+        ActionItem(
+            task="Send the one-pager",
+            owner="Tom",
+            due="Friday",
+            detail="needs comms sign-off first",
+        )
+    ]
+    pm = _pm(action_items=items)
+    text = _build_message(pm, me_aliases=["Tom"])
+    assert "<b>Send the one-pager</b>" in text  # key item bolded
+    assert "needs comms sign-off first" in text  # explanation shown
+    assert "Tom" in text and "due Friday" in text  # owner/due as trailing meta
 
 
 # ---------------------------------------------------------------------------

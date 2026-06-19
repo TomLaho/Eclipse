@@ -21,6 +21,8 @@ def slugify(text: str, max_len: int = 60) -> str:
 
 def _format_action(item: ActionItem) -> str:
     line = f"- [ ] {item.task}"
+    if item.detail:
+        line += f" — {item.detail}"
     meta = []
     if item.owner:
         meta.append(f"**{item.owner}**")

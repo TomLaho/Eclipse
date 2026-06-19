@@ -262,11 +262,18 @@ def reenrich(
         console.print("[red]Ollama not reachable. Start it with `ollama serve`.[/red]")
         raise typer.Exit(1)
 
-    new_path, enriched = reenrich_note(cfg, enricher, note)
-    if enriched:
+    new_path, pm = reenrich_note(cfg, enricher, note)
+    if pm.enriched:
         console.print(f"[green]Re-enriched[/green] -> {new_path}")
     else:
         console.print(f"[yellow]LLM failed; wrote fallback[/yellow] -> {new_path}")
+
+    # Mirror the normal pipeline: push the summary + "may have missed" to Telegram.
+    if cfg.telegram_enabled and cfg.telegram_on_process:
+        from eclipse.notify.telegram import notify_meeting
+
+        notify_meeting(pm, cfg.me_aliases)
+        console.print("[dim]Sent to Telegram.[/dim]")
 
 
 @app.command()

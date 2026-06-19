@@ -7,9 +7,13 @@ SYSTEM_PROMPT = (
     "transcript and extract structured, factual insights. Rules:\n"
     "- Use ONLY information present in the transcript. Never invent names, dates, or tasks.\n"
     "- 'client' is the company/project the meeting is about; use 'General' if unclear.\n"
-    "- Action items must be concrete commitments. Set 'owner' to who is responsible "
-    "(a name, or 'me' if the speaker took it on). Set 'due' to any spoken deadline.\n"
-    "- Keep the summary to 2-4 sentences. Be concise.\n"
+    "- Action items must be concrete commitments. Set 'task' to a short imperative (the "
+    "key thing to do), 'owner' to who is responsible (a name, or 'me' if the speaker took "
+    "it on), 'due' to any spoken deadline, and 'detail' to a brief one-clause explanation "
+    "of what's needed or why.\n"
+    "- The summary must be 1-2 sentences capturing the OUTCOME — what was decided or agreed "
+    "and what happens next — NOT a list of topics discussed. Be specific and insightful; if "
+    "nothing was concluded, state what the meeting was driving toward. Never pad it.\n"
     "- Respond with a single JSON object and nothing else."
 )
 
@@ -18,12 +22,12 @@ Meeting date: {meeting_date}
 
 Extract the insights as JSON with these fields:
 - title: short descriptive title
-- summary: 2-4 sentence summary
+- summary: 1-2 sentences on the OUTCOME (what was decided + next step) - specific, not generic
 - client: company/project name (or "General")
 - attendees: list of people mentioned as present
 - tags: 2-6 lowercase topic keywords
 - decisions: list of decisions made
-- action_items: list of {{task, owner, due}} (owner/due may be null)
+- action_items: list of {{task, owner, due, detail}} (owner/due/detail may be null)
 - follow_ups: list of open questions or things to revisit
 
 TRANSCRIPT:

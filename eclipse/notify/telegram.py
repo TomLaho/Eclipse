@@ -180,11 +180,28 @@ def _build_message(pm: ProcessedMeeting, me_aliases: list[str]) -> str:
         lines.append("")
         lines.append("<b>Action items:</b>")
         for item in ins.action_items:
-            owner_str = f" ({_esc(item.owner)})" if item.owner else ""
-            due_str = f" — due {_esc(item.due)}" if item.due else ""
             is_mine = bool(item.owner and item.owner.strip().lower() in lowered_aliases)
             marker = "👤 " if is_mine else "• "
-            lines.append(f"{marker}<i>{_esc(item.task)}</i>{owner_str}{due_str}")
+            detail_str = f" — {_esc(item.detail)}" if item.detail else ""
+            meta: list[str] = []
+            if item.owner:
+                meta.append(_esc(item.owner))
+            if item.due:
+                meta.append(f"due {_esc(item.due)}")
+            meta_str = f" ({'; '.join(meta)})" if meta else ""
+            # Key item bold, then a quick explanation, then owner/due.
+            lines.append(f"{marker}<b>{_esc(item.task)}</b>{detail_str}{meta_str}")
+
+    # Safety-net callout: what the second pass surfaced that the first read missed.
+    # Only shown when enrichment actually ran (a fallback note has nothing to add).
+    if pm.enriched:
+        lines.append("")
+        if ins.missed_items:
+            lines.append("🔍 <b>You may have missed:</b>")
+            for m in ins.missed_items:
+                lines.append(f"• <i>{_esc(m)}</i>")
+        else:
+            lines.append("🔍 <i>Nothing extra flagged on review.</i>")
 
     return "\n".join(lines)
 
