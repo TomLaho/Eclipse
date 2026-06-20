@@ -212,6 +212,13 @@ def status() -> None:
     table.add_row(
         "LLM reachable", "[green]yes[/green]" if enricher.available() else "[red]no[/red]"
     )
+    embed_ok = enricher.model_present(cfg.embed_model)
+    table.add_row(
+        "Semantic search",
+        f"[green]{cfg.embed_model}[/green]"
+        if embed_ok
+        else f"[yellow]{cfg.embed_model} not pulled (ask uses summaries)[/yellow]",
+    )
     console.print(table)
 
 
@@ -290,6 +297,33 @@ def ask(
     """Ask a question across all your meetings."""
     cfg = _cfg()
     console.print(review.answer_question(cfg, question))
+
+
+@app.command(name="index")
+def index_cmd() -> None:
+    """Build/refresh the semantic search index used by `ask` (incremental)."""
+    from eclipse.search import EmbeddingIndex
+
+    cfg = _cfg()
+    enricher = OllamaEnricher(
+        cfg.ollama_base_url,
+        cfg.ollama_model,
+        cfg.ollama_timeout_sec,
+    )
+    if not enricher.model_present(cfg.embed_model):
+        console.print(
+            f"[yellow]Embedding model `{cfg.embed_model}` not found.[/yellow] "
+            f"Pull it with [cyan]ollama pull {cfg.embed_model}[/cyan], then "
+            "`ask` will use semantic retrieval (it falls back to summaries until then)."
+        )
+        raise typer.Exit(1)
+    console.print(f"Embedding new/changed notes with [cyan]{cfg.embed_model}[/cyan]…")
+    with EmbeddingIndex(cfg.embeddings_path) as idx:
+        embedded, total = idx.refresh(cfg, enricher)
+    console.print(
+        f"[green]Index up to date[/green] - {embedded} note(s) (re)embedded, "
+        f"{total} chunk(s) total."
+    )
 
 
 @app.command()
@@ -621,6 +655,11 @@ two_pass_extraction = true
 # Standing context prepended to every LLM call (who you are, recurring people, what
 # to prioritise). Leave the file missing/empty to run with no profile.
 context_profile_path = "context_profile.md"
+
+# Semantic search for `ask`: pull the model with `ollama pull nomic-embed-text` and
+# run `eclipse index`. Falls back to per-meeting summaries when it isn't present.
+embed_model = "nomic-embed-text"
+ask_top_k = 12
 include_transcript_in_note = true
 
 # Names that mean "you" (for flagging your own action items)

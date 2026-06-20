@@ -16,6 +16,9 @@ import frontmatter
 
 from eclipse.config import Config
 from eclipse.enrich.llm import OllamaEnricher
+from eclipse.log import get_logger
+
+log = get_logger("review")
 
 # folders inside the vault that are not meeting notes
 _RESERVED = {"_audio", "_digests", "_todos", "_attachments"}
@@ -142,9 +145,6 @@ _ASK_SYSTEM = (
 
 
 def answer_question(cfg: Config, question: str) -> str:
-    corpus = build_corpus(cfg.vault_dir)
-    if not corpus.strip():
-        return "No meetings in the vault yet."
     enricher = OllamaEnricher(
         cfg.ollama_base_url,
         cfg.ollama_model,
@@ -153,8 +153,32 @@ def answer_question(cfg: Config, question: str) -> str:
     )
     if not enricher.available():
         return "Local LLM (Ollama) is not reachable, so Q&A is unavailable. Run `ollama serve`."
+    corpus = _retrieve_corpus(cfg, enricher, question)
+    if not corpus.strip():
+        return "No meetings in the vault yet."
     user = f"MEETING NOTES:\n{corpus}\n\nQUESTION: {question}"
     return enricher.chat(_ASK_SYSTEM, user)
+
+
+def _retrieve_corpus(cfg: Config, enricher: OllamaEnricher, question: str) -> str:
+    """Most-relevant chunks via embeddings when available; else every summary.
+
+    Semantic retrieval scales to large vaults; the compact-summary corpus is the
+    fallback when the embedding model isn't pulled or anything goes wrong.
+    """
+    if enricher.model_present(cfg.embed_model):
+        try:
+            from eclipse.search import EmbeddingIndex, semantic_corpus
+
+            with EmbeddingIndex(cfg.embeddings_path) as index:
+                index.refresh(cfg, enricher)
+                qvec = enricher.embed([question], cfg.embed_model)[0]
+                hits = index.search(qvec, cfg.ask_top_k)
+            if hits:
+                return semantic_corpus(hits)
+        except Exception as exc:  # fall back rather than fail the question
+            log.warning("semantic_search_failed", error=str(exc))
+    return build_corpus(cfg.vault_dir)
 
 
 # --- digest ("nothing missed") -------------------------------------------

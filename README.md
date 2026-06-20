@@ -67,6 +67,7 @@ uv run eclipse process FILE   # process one file anywhere on disk
 uv run eclipse status         # config, readiness, storage usage
 uv run eclipse digest         # roll up all open action items
 uv run eclipse ask "..."      # question across all meetings
+uv run eclipse index          # build/refresh semantic search index for ask
 uv run eclipse todos          # draft your open commitments for review
 ```
 
@@ -95,8 +96,12 @@ never committed.
 
 - Speaker diarization ("who said what") — optional, heavier on RAM.
 - Notion todo push (draft → approve → push) — `todos` already drafts the approval file.
-- Semantic search via local embeddings for large vaults.
 - Optional local web dashboard.
+
+Semantic search via local embeddings is now built: `ollama pull nomic-embed-text`,
+then `eclipse index` (also auto-refreshed on `ask`). `ask` retrieves the most
+relevant note chunks instead of every summary, and falls back to summaries when the
+embedding model isn't pulled.
 
 ## Development
 

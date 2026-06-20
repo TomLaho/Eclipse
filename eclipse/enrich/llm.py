@@ -74,7 +74,11 @@ class OllamaEnricher:
         self.context_profile = context_profile.strip()
 
     def available(self) -> bool:
-        """True if the Ollama server responds and the model is present."""
+        """True if the Ollama server responds and the chat model is present."""
+        return self.model_present(self.model)
+
+    def model_present(self, model: str) -> bool:
+        """True if the Ollama server responds and ``model`` is pulled."""
         try:
             resp = httpx.get(f"{self.base_url}/api/tags", timeout=5.0)
             resp.raise_for_status()
@@ -82,8 +86,17 @@ class OllamaEnricher:
             return False
         names = {m.get("name", "") for m in resp.json().get("models", [])}
         # tolerate "llama3.2:3b" vs "llama3.2:3b-instruct-q4_K_M" style suffixes
-        base = self.model.split(":")[0]
-        return any(n == self.model or n.startswith(base) for n in names)
+        base = model.split(":")[0]
+        return any(n == model or n.startswith(base) for n in names)
+
+    def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        """Return an embedding vector per input text. Raises on transport error."""
+        if not texts:
+            return []
+        payload = {"model": model, "input": texts}
+        resp = httpx.post(f"{self.base_url}/api/embed", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return [[float(x) for x in vec] for vec in resp.json()["embeddings"]]
 
     def enrich(
         self, transcript: str, meeting_date: date, source_name: str

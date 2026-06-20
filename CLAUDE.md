@@ -73,10 +73,15 @@ uv run pytest -q && uv run ruff check . && uv run mypy eclipse
 - Notion todo push (`notion-push` + interactive `approve` via Telegram inline buttons).
 - Telegram notifications + `telegram-pull` (phone → inbox transfer).
 - Map-reduce enrichment for very long meetings (`llm._condense`, >30k chars).
+- Standing **context profile** (`config.context_profile`): `context_profile.md`
+  (git-ignored; redacted `context_profile.example.md` committed) is prepended to every
+  LLM system prompt via `OllamaEnricher._with_profile`.
+- **Semantic search** (`eclipse/search.py`): SQLite-backed embedding index over note
+  chunks (Ollama `nomic-embed-text`), incremental refresh, pure-Python cosine. `ask`
+  retrieves top-k chunks via `review._retrieve_corpus` and falls back to the compact
+  summary corpus when the embed model isn't pulled. Build with `eclipse index`.
 
 ## What's next (not yet built)
 
-- Semantic search via local embeddings for large vaults (current `ask` feeds compact
-  per-meeting summaries; fine for tens-to-low-hundreds of meetings).
 - Optional local web dashboard (Tom chose Obsidian for v1).
 ```
