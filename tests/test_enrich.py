@@ -1,8 +1,20 @@
 from datetime import date
 
 from eclipse.enrich.dates import resolve_action_dates, resolve_due
-from eclipse.enrich.llm import _merge_unique
+from eclipse.enrich.llm import OllamaEnricher, _merge_unique
 from eclipse.models import ActionItem, MeetingInsights
+
+
+def test_with_profile_prepends_standing_context() -> None:
+    enricher = OllamaEnricher(context_profile="Tom leads cost-out at Endeavour.")
+    out = enricher._with_profile("Base system prompt.")
+    assert "Tom leads cost-out at Endeavour." in out
+    assert out.rstrip().endswith("Base system prompt.")
+
+
+def test_with_profile_noop_when_empty() -> None:
+    enricher = OllamaEnricher(context_profile="  ")
+    assert enricher._with_profile("Base system prompt.") == "Base system prompt."
 
 
 def test_resolve_due_relative_to_meeting() -> None:

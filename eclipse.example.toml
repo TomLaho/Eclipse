@@ -40,6 +40,12 @@ ollama_timeout_sec = 600.0
 # Costs time, not peak RAM (same model, run again). Turn off to halve LLM time.
 two_pass_extraction = true
 
+# Standing context prepended to every LLM call (extraction, ask, digest): who you
+# are, recurring people, and what to prioritise when summarising. Copy
+# context_profile.example.md to context_profile.md (git-ignored) and edit it.
+# Leave the file missing/empty to run with no profile.
+context_profile_path = "context_profile.md"
+
 # Include the full transcript at the bottom of each note.
 include_transcript_in_note = true
 

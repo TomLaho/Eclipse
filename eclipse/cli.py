@@ -57,6 +57,7 @@ def _pipeline(cfg: Config, registry: Registry) -> Pipeline:
         cfg.ollama_model,
         cfg.ollama_timeout_sec,
         two_pass=cfg.two_pass_extraction,
+        context_profile=cfg.context_profile,
     )
     if cfg.enrich and not enricher.available():
         console.print(
@@ -189,7 +190,12 @@ app.command(name="watch")(watch_cmd)
 def status() -> None:
     """Show configuration, readiness, and storage usage."""
     cfg = _cfg()
-    enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+    enricher = OllamaEnricher(
+        cfg.ollama_base_url,
+        cfg.ollama_model,
+        cfg.ollama_timeout_sec,
+        context_profile=cfg.context_profile,
+    )
     with Registry(cfg.registry_path) as registry:
         processed = registry.count()
     notes = sum(1 for _ in review.iter_notes(cfg.vault_dir))
@@ -257,6 +263,7 @@ def reenrich(
         cfg.ollama_model,
         cfg.ollama_timeout_sec,
         two_pass=cfg.two_pass_extraction,
+        context_profile=cfg.context_profile,
     )
     if not enricher.available():
         console.print("[red]Ollama not reachable. Start it with `ollama serve`.[/red]")
@@ -611,6 +618,9 @@ ollama_model = "llama3.2:3b"
 ollama_base_url = "http://localhost:11434"
 # Second LLM pass for missed commitments (costs time, not peak RAM).
 two_pass_extraction = true
+# Standing context prepended to every LLM call (who you are, recurring people, what
+# to prioritise). Leave the file missing/empty to run with no profile.
+context_profile_path = "context_profile.md"
 include_transcript_in_note = true
 
 # Names that mean "you" (for flagging your own action items)

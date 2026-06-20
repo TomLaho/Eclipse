@@ -145,7 +145,12 @@ def answer_question(cfg: Config, question: str) -> str:
     corpus = build_corpus(cfg.vault_dir)
     if not corpus.strip():
         return "No meetings in the vault yet."
-    enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+    enricher = OllamaEnricher(
+        cfg.ollama_base_url,
+        cfg.ollama_model,
+        cfg.ollama_timeout_sec,
+        context_profile=cfg.context_profile,
+    )
     if not enricher.available():
         return "Local LLM (Ollama) is not reachable, so Q&A is unavailable. Run `ollama serve`."
     user = f"MEETING NOTES:\n{corpus}\n\nQUESTION: {question}"
@@ -191,7 +196,12 @@ def build_digest(cfg: Config, with_briefing: bool = True) -> str:
     ]
 
     if with_briefing and actions:
-        enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+        enricher = OllamaEnricher(
+            cfg.ollama_base_url,
+            cfg.ollama_model,
+            cfg.ollama_timeout_sec,
+            context_profile=cfg.context_profile,
+        )
         if enricher.available():
             listing = "\n".join(
                 f"- {a.task} (owner: {a.owner or '?'}, due: {a.due or '?'}, "

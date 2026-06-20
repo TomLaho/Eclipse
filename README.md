@@ -80,6 +80,7 @@ All settings live in `eclipse.toml` (see `eclipse.example.toml`). Highlights:
 | `audio_retention` | `keep` | `keep` / `archive` / `delete` after transcription |
 | `whisper_model` | `small.en` | `tiny.en` → `medium.en` (bigger = better, slower) |
 | `ollama_model` | `llama3.2:3b` | Any local Ollama model; swap up as RAM allows |
+| `context_profile_path` | `context_profile.md` | Standing context (who you are, recurring people, what to prioritise) prepended to every LLM call. Copy `context_profile.example.md`; the real file is git-ignored so your names/figures stay local. Leave missing for none |
 
 If Ollama isn't running, Eclipse still transcribes and files notes (marked `unenriched`)
 and you can re-run enrichment later.

@@ -53,6 +53,9 @@ class Config(BaseSettings):
     ollama_timeout_sec: float = 600.0
     # second LLM pass that re-reads the transcript for missed commitments
     two_pass_extraction: bool = True
+    # standing context (who you are, recurring people, what to prioritise) read
+    # from this file and prepended to every LLM call; empty/missing = no profile
+    context_profile_path: Path = Path("context_profile.md")
 
     # --- behaviour ---
     audio_retention: RetentionPolicy = "keep"
@@ -87,6 +90,14 @@ class Config(BaseSettings):
     def audio_dir(self) -> Path:
         sub = Path(self.audio_subdir)
         return sub if sub.is_absolute() else self.vault_dir / sub
+
+    @property
+    def context_profile(self) -> str:
+        """Standing-context text for the LLM, or '' if no profile file exists."""
+        try:
+            return self.context_profile_path.expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
 
     @property
     def effective_initial_prompt(self) -> str | None:

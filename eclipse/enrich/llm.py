@@ -65,11 +65,13 @@ class OllamaEnricher:
         model: str = "llama3.2:3b",
         timeout: float = 600.0,
         two_pass: bool = True,
+        context_profile: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.two_pass = two_pass
+        self.context_profile = context_profile.strip()
 
     def available(self) -> bool:
         """True if the Ollama server responds and the model is present."""
@@ -165,12 +167,22 @@ class OllamaEnricher:
         insights.missed_items.extend(added)
         log.info("second_pass_merged", surfaced=len(added))
 
+    def _with_profile(self, system: str) -> str:
+        """Prepend the user's standing context so every call is tailored to them."""
+        if not self.context_profile:
+            return system
+        return (
+            "STANDING CONTEXT about the user and their work (use it to interpret the "
+            "transcript and weight what matters; do NOT treat it as facts to extract):\n"
+            f"{self.context_profile}\n\n---\n\n{system}"
+        )
+
     def chat(self, system: str, user: str, temperature: float = 0.2) -> str:
         """Free-form chat completion (used by ask/digest). Raises on transport error."""
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": self._with_profile(system)},
                 {"role": "user", "content": user},
             ],
             "stream": False,
@@ -187,7 +199,7 @@ class OllamaEnricher:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": self._with_profile(system)},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
