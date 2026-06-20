@@ -52,13 +52,7 @@ def _pipeline(cfg: Config, registry: Registry) -> Pipeline:
         initial_prompt=cfg.effective_initial_prompt,
         word_timestamps=cfg.whisper_word_timestamps or cfg.diarize,
     )
-    enricher = OllamaEnricher(
-        cfg.ollama_base_url,
-        cfg.ollama_model,
-        cfg.ollama_timeout_sec,
-        two_pass=cfg.two_pass_extraction,
-        context_profile=cfg.context_profile,
-    )
+    enricher = OllamaEnricher.from_config(cfg)
     if cfg.enrich and not enricher.available():
         console.print(
             "[yellow]! Ollama not reachable - notes will be transcribed but not "
@@ -66,6 +60,27 @@ def _pipeline(cfg: Config, registry: Registry) -> Pipeline:
             f"{cfg.ollama_model}`.[/yellow]"
         )
     return Pipeline(cfg, transcriber, enricher, registry)
+
+
+def _refresh_index(cfg: Config) -> None:
+    """Keep the semantic-search index current after processing. Best-effort.
+
+    Indexing lives here (not in `ask`) so the slow embed cost is paid during batch
+    processing, leaving `ask` instant. Silently skips when the embed model isn't
+    pulled or Ollama is unreachable.
+    """
+    from eclipse.search import EmbeddingIndex
+
+    enricher = OllamaEnricher.from_config(cfg)
+    if not enricher.model_present(cfg.embed_model):
+        return
+    try:
+        with EmbeddingIndex(cfg.embeddings_path) as idx:
+            embedded, _ = idx.refresh(cfg, enricher)
+        if embedded:
+            console.print(f"[dim]Semantic index updated ({embedded} note(s)).[/dim]")
+    except Exception as exc:  # never let indexing break the processing command
+        log.get_logger("cli").warning("index_refresh_failed", error=str(exc))
 
 
 def _dir_size_mb(path: Path) -> float:
@@ -139,6 +154,8 @@ def run(
         pipeline = _pipeline(cfg, registry)
         results = pipeline.process_batch(files)
     _summarize(results)
+    if any(r.status == "written" for r in results):
+        _refresh_index(cfg)
 
 
 @app.command()
@@ -155,6 +172,8 @@ def process(
         pipeline = _pipeline(cfg, registry)
         result = pipeline.process_file(file)
     _summarize([result])
+    if result.status == "written":
+        _refresh_index(cfg)
 
 
 def watch_cmd(  # registered below as `eclipse watch`
@@ -168,11 +187,14 @@ def watch_cmd(  # registered below as `eclipse watch`
         # catch up on anything already waiting
         for f in scan_inbox(cfg.inbox_dir):
             pipeline.process_file(f)
+        _refresh_index(cfg)
 
         def handler(path: Path) -> None:
             # The watcher only invokes this for files that have already settled,
             # so there's no need to wait again here.
-            pipeline.process_file(path)
+            result = pipeline.process_file(path)
+            if result.status == "written":
+                _refresh_index(cfg)
 
         console.print(f"[bold]Watching[/bold] {cfg.inbox_dir} (Ctrl-C to stop)")
         try:
@@ -190,12 +212,7 @@ app.command(name="watch")(watch_cmd)
 def status() -> None:
     """Show configuration, readiness, and storage usage."""
     cfg = _cfg()
-    enricher = OllamaEnricher(
-        cfg.ollama_base_url,
-        cfg.ollama_model,
-        cfg.ollama_timeout_sec,
-        context_profile=cfg.context_profile,
-    )
+    enricher = OllamaEnricher.from_config(cfg)
     with Registry(cfg.registry_path) as registry:
         processed = registry.count()
     notes = sum(1 for _ in review.iter_notes(cfg.vault_dir))
@@ -265,13 +282,7 @@ def reenrich(
     if not note.exists():
         console.print(f"[red]No such note:[/red] {note}")
         raise typer.Exit(1)
-    enricher = OllamaEnricher(
-        cfg.ollama_base_url,
-        cfg.ollama_model,
-        cfg.ollama_timeout_sec,
-        two_pass=cfg.two_pass_extraction,
-        context_profile=cfg.context_profile,
-    )
+    enricher = OllamaEnricher.from_config(cfg)
     if not enricher.available():
         console.print("[red]Ollama not reachable. Start it with `ollama serve`.[/red]")
         raise typer.Exit(1)
@@ -305,11 +316,7 @@ def index_cmd() -> None:
     from eclipse.search import EmbeddingIndex
 
     cfg = _cfg()
-    enricher = OllamaEnricher(
-        cfg.ollama_base_url,
-        cfg.ollama_model,
-        cfg.ollama_timeout_sec,
-    )
+    enricher = OllamaEnricher.from_config(cfg)
     if not enricher.model_present(cfg.embed_model):
         console.print(
             f"[yellow]Embedding model `{cfg.embed_model}` not found.[/yellow] "
@@ -399,6 +406,8 @@ def telegram_pull(
             pipeline = _pipeline(cfg, registry)
             results = pipeline.process_batch(result.saved)
         _summarize(results)
+        if any(r.status == "written" for r in results):
+            _refresh_index(cfg)
     else:
         console.print("Run [cyan]eclipse run[/cyan] to process them.")
 
@@ -451,11 +460,12 @@ def notion_push(
 
     db_id = secrets.notion_todos_db_id
     status = "Approved" if approved else "Review"
+    existing = todos.existing_ids(db_id)  # fetch once, not per action
     pushed = 0
     skipped = 0
     for action in actions:
         try:
-            ok = todos.push_todo(db_id, action, status=status)
+            ok = todos.push_todo(db_id, action, status=status, existing=existing)
             if ok:
                 pushed += 1
                 console.print(f"  [green]+[/green] {action.task}")
@@ -512,6 +522,7 @@ def _collect_approvals(
     db_id: str,
     pending: dict[int, review.OpenAction],
     eid_to_mid: dict[str, int],
+    existing: set[str],
 ) -> None:
     """Long-poll Telegram, push approved actions to Notion until all are resolved.
 
@@ -565,7 +576,7 @@ def _collect_approvals(
 
             if action_type == "approve":
                 try:
-                    notion.push_todo(db_id, action, status="Approved")
+                    notion.push_todo(db_id, action, status="Approved", existing=existing)
                     tg.edit_message_text(mid, f"✅ Added to Notion\n<i>{action.task}</i>")
                     console.print(f"  [green]✅[/green] {action.task}")
                 except Exception as exc:
@@ -622,7 +633,8 @@ def approve() -> None:
     pending, eid_to_mid = _send_approval_requests(tg, actions)
     if not pending:
         return
-    _collect_approvals(tg, notion, db_id, pending, eid_to_mid)
+    existing = notion.existing_ids(db_id)  # fetch once for the whole session
+    _collect_approvals(tg, notion, db_id, pending, eid_to_mid, existing)
 
 
 _DEFAULT_TOML = """\

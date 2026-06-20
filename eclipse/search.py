@@ -140,41 +140,49 @@ class EmbeddingIndex:
         if self._get_meta("embed_model") != cfg.embed_model:
             self.clear()
             self._set_meta("embed_model", cfg.embed_model)
+            self._conn.commit()
 
         notes = list(iter_notes(cfg.vault_dir))
         on_disk = {str(n.path): n for n in notes}
 
+        # all chunks of a note share one hash; aggregate so a partial prior write
+        # can't yield two rows and a silently-wrong cache decision.
         stored_hash = {
             str(row["note_path"]): str(row["note_hash"])
-            for row in self._conn.execute("SELECT DISTINCT note_path, note_hash FROM chunks")
+            for row in self._conn.execute(
+                "SELECT note_path, MAX(note_hash) AS note_hash FROM chunks GROUP BY note_path"
+            )
         }
 
-        # prune notes that were deleted or renamed
-        for path in set(stored_hash) - set(on_disk):
-            self._conn.execute("DELETE FROM chunks WHERE note_path = ?", (path,))
-
         embedded = 0
+        # one transaction per note: a failed embed leaves that note's prior chunks
+        # intact rather than deleting them and dying before the re-insert.
+        for path in set(stored_hash) - set(on_disk):
+            with self._conn:  # prune notes that were deleted or renamed
+                self._conn.execute("DELETE FROM chunks WHERE note_path = ?", (path,))
+
         for path, note in on_disk.items():
             body_hash = _content_hash(note.body)
             if stored_hash.get(path) == body_hash:
                 continue
-            self._conn.execute("DELETE FROM chunks WHERE note_path = ?", (path,))
             texts = chunk_note(note)
             if not texts:
                 continue
             vectors = _embed_batched(enricher, texts, cfg.embed_model)
-            self._conn.executemany(
-                "INSERT INTO chunks "
-                "(note_path, chunk_idx, note_hash, title, date, client, text, vector) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (path, i, body_hash, note.title, note.date, note.client, t, _pack(_unit(v)))
-                    for i, (t, v) in enumerate(zip(texts, vectors, strict=True))
-                ],
-            )
+            rows = [
+                (path, i, body_hash, note.title, note.date, note.client, t, _pack(_unit(v)))
+                for i, (t, v) in enumerate(zip(texts, vectors, strict=True))
+            ]
+            with self._conn:  # delete + re-insert atomically
+                self._conn.execute("DELETE FROM chunks WHERE note_path = ?", (path,))
+                self._conn.executemany(
+                    "INSERT INTO chunks "
+                    "(note_path, chunk_idx, note_hash, title, date, client, text, vector) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
             embedded += 1
 
-        self._conn.commit()
         return embedded, self.count()
 
     def search(self, query_vec: list[float], k: int) -> list[Hit]:

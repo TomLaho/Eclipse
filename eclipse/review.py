@@ -131,6 +131,7 @@ def build_corpus(vault_dir: Path, budget: int = _CORPUS_BUDGET) -> str:
             f"Open actions:\n{open_lines}\n" if open_lines else ""
         )
         if used + len(block) > budget:
+            log.info("corpus_truncated", included=len(blocks), total=len(notes))
             break
         blocks.append(block)
         used += len(block)
@@ -145,12 +146,7 @@ _ASK_SYSTEM = (
 
 
 def answer_question(cfg: Config, question: str) -> str:
-    enricher = OllamaEnricher(
-        cfg.ollama_base_url,
-        cfg.ollama_model,
-        cfg.ollama_timeout_sec,
-        context_profile=cfg.context_profile,
-    )
+    enricher = OllamaEnricher.from_config(cfg)
     if not enricher.available():
         return "Local LLM (Ollama) is not reachable, so Q&A is unavailable. Run `ollama serve`."
     corpus = _retrieve_corpus(cfg, enricher, question)
@@ -170,8 +166,9 @@ def _retrieve_corpus(cfg: Config, enricher: OllamaEnricher, question: str) -> st
         try:
             from eclipse.search import EmbeddingIndex, semantic_corpus
 
+            # read-only: the index is built by `eclipse index` / after processing,
+            # never re-embedded inside an interactive `ask` (slow on a CPU box).
             with EmbeddingIndex(cfg.embeddings_path) as index:
-                index.refresh(cfg, enricher)
                 qvec = enricher.embed([question], cfg.embed_model)[0]
                 hits = index.search(qvec, cfg.ask_top_k)
             if hits:
@@ -220,12 +217,7 @@ def build_digest(cfg: Config, with_briefing: bool = True) -> str:
     ]
 
     if with_briefing and actions:
-        enricher = OllamaEnricher(
-            cfg.ollama_base_url,
-            cfg.ollama_model,
-            cfg.ollama_timeout_sec,
-            context_profile=cfg.context_profile,
-        )
+        enricher = OllamaEnricher.from_config(cfg)
         if enricher.available():
             listing = "\n".join(
                 f"- {a.task} (owner: {a.owner or '?'}, due: {a.due or '?'}, "

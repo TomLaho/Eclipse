@@ -129,9 +129,7 @@ class Pipeline:
     def _enrich_and_write(self, t: _Transcribed) -> PipelineResult:
         """Stage 2: enrich the transcript, write the note, apply retention."""
         try:
-            insights, enriched = self.enricher.enrich(
-                t.transcript.text, t.mtg_date, t.path.name
-            )
+            insights, enriched = self.enricher.enrich(t.transcript.text, t.mtg_date, t.path.name)
             resolve_action_dates(insights, t.mtg_date)
 
             audio_relpath = self._plan_audio_relpath(
@@ -267,7 +265,9 @@ def reenrich_note(
         enriched=enriched,
     )
 
-    # Remove the old note first so an unchanged path doesn't collide into "-2".
-    note_path.unlink(missing_ok=True)
-    new_path = write_note(cfg.vault_dir, pm)
+    # Write the re-enriched note first (atomically overwriting the old one when the
+    # path is unchanged); only drop the old file if the title/client moved its path.
+    new_path = write_note(cfg.vault_dir, pm, replacing=note_path)
+    if new_path != note_path:
+        note_path.unlink(missing_ok=True)
     return new_path, pm

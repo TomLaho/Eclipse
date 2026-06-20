@@ -138,3 +138,26 @@ def test_reenrich_note_rewrites_from_transcript(tmp_path: Path) -> None:
     assert "Do thing" in text  # action item from enrichment
     assert "we agreed Tom will send the deck" in text  # transcript preserved
     assert "status: complete" in text
+
+
+def test_reenrich_overwrites_in_place_when_path_unchanged(tmp_path: Path) -> None:
+    """Re-enriching a note whose title/client don't change must overwrite it,
+    not leave a stale original and a new "-2" copy."""
+    cfg = _cfg(tmp_path)
+    # Seed a note whose title/client already match the FakeEnricher output (Mtg/Acme).
+    pm = ProcessedMeeting(
+        source_name="rec.m4a",
+        file_hash="hash123",
+        meeting_date=date(2026, 6, 17),
+        transcript=TranscriptResult(text="we agreed Tom will send the deck", duration_sec=120.0),
+        insights=MeetingInsights(title="Mtg", summary="old", client="Acme"),
+        enriched=False,
+    )
+    old_path = write_note(cfg.vault_dir, pm)
+    new_path, _ = reenrich_note(cfg, FakeEnricher(), old_path)  # type: ignore[arg-type]
+
+    assert new_path == old_path  # same path, overwritten in place
+    assert old_path.exists()
+    assert "old" not in old_path.read_text(encoding="utf-8")  # content was replaced
+    # exactly one file in the dir: no orphaned "-2" copy and no leftover ".tmp"
+    assert list(old_path.parent.iterdir()) == [old_path]

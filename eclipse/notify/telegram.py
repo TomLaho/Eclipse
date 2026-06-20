@@ -46,6 +46,15 @@ class TelegramClient:
         self._base = f"{_API_BASE}{token}"
         self._http = httpx.Client(timeout=30.0)
 
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> TelegramClient:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     # ------------------------------------------------------------------
     # Core API methods
     # ------------------------------------------------------------------
@@ -216,12 +225,12 @@ def notify_meeting(pm: ProcessedMeeting, me_aliases: list[str]) -> None:
         log.warning("telegram_skipped", reason="bot token or chat_id not configured")
         return
 
-    client = TelegramClient(s.telegram_bot_token, s.telegram_chat_id)
     text = _build_message(pm, me_aliases)
-    try:
-        client.send_message(text)
-    except Exception as exc:
-        log.warning("telegram_send_failed", error=str(exc))
+    with TelegramClient(s.telegram_bot_token, s.telegram_chat_id) as client:
+        try:
+            client.send_message(text)
+        except Exception as exc:
+            log.warning("telegram_send_failed", error=str(exc))
 
 
 # ------------------------------------------------------------------
@@ -230,8 +239,20 @@ def notify_meeting(pm: ProcessedMeeting, me_aliases: list[str]) -> None:
 
 # Audio/video container extensions Eclipse accepts when shared as a document.
 _AUDIO_EXTS = {
-    ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".oga", ".opus",
-    ".flac", ".mp4", ".m4b", ".amr", ".3gp", ".webm", ".mkv",
+    ".m4a",
+    ".mp3",
+    ".wav",
+    ".aac",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".flac",
+    ".mp4",
+    ".m4b",
+    ".amr",
+    ".3gp",
+    ".webm",
+    ".mkv",
 }
 # A YYYY-MM-DD-ish date already present in a filename (so we don't double-date).
 _DATE_IN_NAME_RE = re.compile(r"20\d{2}[-_]?\d{2}[-_]?\d{2}")
@@ -353,7 +374,8 @@ def pull_audio(client: TelegramClient, inbox: Path, state_path: Path) -> PullRes
                 skipped_too_big.append(audio.file_name)
             else:
                 inbox.mkdir(parents=True, exist_ok=True)
-                dest = _unique_path(inbox / audio.file_name)
+                # strip any path components a malicious filename could smuggle in
+                dest = _unique_path(inbox / Path(audio.file_name).name)
                 try:
                     client.download_file(file_path, dest)
                 except Exception as exc:

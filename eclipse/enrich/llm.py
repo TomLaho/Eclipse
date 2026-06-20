@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from eclipse.config import Config
 
 from eclipse.enrich.prompts import (
     MAP_SYSTEM,
@@ -72,6 +76,17 @@ class OllamaEnricher:
         self.timeout = timeout
         self.two_pass = two_pass
         self.context_profile = context_profile.strip()
+
+    @classmethod
+    def from_config(cls, cfg: Config) -> OllamaEnricher:
+        """Build an enricher from the app config (the single construction point)."""
+        return cls(
+            cfg.ollama_base_url,
+            cfg.ollama_model,
+            cfg.ollama_timeout_sec,
+            two_pass=cfg.two_pass_extraction,
+            context_profile=cfg.context_profile,
+        )
 
     def available(self) -> bool:
         """True if the Ollama server responds and the chat model is present."""
