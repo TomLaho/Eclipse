@@ -40,6 +40,20 @@ ollama_timeout_sec = 600.0
 # Costs time, not peak RAM (same model, run again). Turn off to halve LLM time.
 two_pass_extraction = true
 
+# Standing context prepended to every LLM call (extraction, ask, digest): who you
+# are, recurring people, and what to prioritise when summarising. Copy
+# context_profile.example.md to context_profile.md (git-ignored) and edit it.
+# Leave the file missing/empty to run with no profile.
+context_profile_path = "context_profile.md"
+
+# --- semantic search (local embeddings via Ollama) ---
+# When this model is pulled (ollama pull nomic-embed-text), `ask` embeds your
+# question and retrieves the most relevant note chunks instead of every summary,
+# so Q&A scales to large vaults. Falls back to summaries when it isn't present.
+# Build/refresh the index with `eclipse index` (also auto-refreshed on `ask`).
+embed_model = "nomic-embed-text"
+ask_top_k = 12
+
 # Include the full transcript at the bottom of each note.
 include_transcript_in_note = true
 

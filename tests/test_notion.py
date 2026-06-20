@@ -194,3 +194,23 @@ def test_push_todo_sets_eclipse_id_in_properties() -> None:
     props = call_kwargs["properties"]
     stored_eid = props["EclipseId"]["rich_text"][0]["text"]["content"]
     assert stored_eid == eclipse_id(action)
+
+
+def test_push_todo_uses_prefetched_existing_without_querying() -> None:
+    """When the caller passes `existing`, push_todo must not query Notion itself."""
+    todos = _make_todos(existing_eids=[])
+    action = _action()
+    existing: set[str] = set()
+    todos.push_todo("db-123", action, existing=existing)
+    todos._client.request.assert_not_called()  # no per-action existing_ids query
+    assert eclipse_id(action) in existing  # created id is added back for run-dedup
+
+
+def test_push_todo_dedups_against_prefetched_set() -> None:
+    todos = _make_todos(existing_eids=[])
+    action = _action()
+    existing = {eclipse_id(action)}
+    result = todos.push_todo("db-123", action, existing=existing)
+    assert result is False
+    todos._client.pages.create.assert_not_called()
+    todos._client.request.assert_not_called()

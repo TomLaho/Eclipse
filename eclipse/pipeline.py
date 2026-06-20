@@ -129,9 +129,7 @@ class Pipeline:
     def _enrich_and_write(self, t: _Transcribed) -> PipelineResult:
         """Stage 2: enrich the transcript, write the note, apply retention."""
         try:
-            insights, enriched = self.enricher.enrich(
-                t.transcript.text, t.mtg_date, t.path.name
-            )
+            insights, enriched = self.enricher.enrich(t.transcript.text, t.mtg_date, t.path.name)
             resolve_action_dates(insights, t.mtg_date)
 
             audio_relpath = self._plan_audio_relpath(
@@ -230,12 +228,14 @@ class Pipeline:
 _TRANSCRIPT_HEADING = "## Transcript"
 
 
-def reenrich_note(cfg: Config, enricher: OllamaEnricher, note_path: Path) -> tuple[Path, bool]:
+def reenrich_note(
+    cfg: Config, enricher: OllamaEnricher, note_path: Path
+) -> tuple[Path, ProcessedMeeting]:
     """Re-run LLM enrichment on an existing note's transcript, no re-transcription.
 
     Reads the transcript and metadata back out of the note, re-enriches, and
     rewrites the note (removing the old file if the client/title changed its
-    path). Returns ``(new_path, enriched)``.
+    path). Returns ``(new_path, processed_meeting)``.
     """
     import frontmatter
 
@@ -265,7 +265,9 @@ def reenrich_note(cfg: Config, enricher: OllamaEnricher, note_path: Path) -> tup
         enriched=enriched,
     )
 
-    # Remove the old note first so an unchanged path doesn't collide into "-2".
-    note_path.unlink(missing_ok=True)
-    new_path = write_note(cfg.vault_dir, pm)
-    return new_path, enriched
+    # Write the re-enriched note first (atomically overwriting the old one when the
+    # path is unchanged); only drop the old file if the title/client moved its path.
+    new_path = write_note(cfg.vault_dir, pm, replacing=note_path)
+    if new_path != note_path:
+        note_path.unlink(missing_ok=True)
+    return new_path, pm

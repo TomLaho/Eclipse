@@ -21,6 +21,8 @@
 .env
 eclipse.toml
 eclipse.local.toml
+# Personal standing context (names, internal figures) - keep local, never upload
+context_profile.md
 
 # Python
 __pycache__/

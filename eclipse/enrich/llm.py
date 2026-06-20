@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from eclipse.config import Config
 
 from eclipse.enrich.prompts import (
     MAP_SYSTEM,
@@ -22,8 +26,10 @@ from eclipse.models import MeetingInsights
 
 log = get_logger("enrich")
 
-# Keep the prompt within a small local model's context window on a low-RAM machine.
-_TRANSCRIPT_BUDGET = 9000
+# Feed the whole transcript for a typical meeting (~35-60 min) so mid-conversation
+# commitments/figures aren't dropped. Larger than this is head/tail trimmed to stay
+# under the request timeout on a slow CPU.
+_TRANSCRIPT_BUDGET = 16000
 # Above this, map-reduce (chunk -> condense -> merge) instead of head/tail trimming.
 # Set high deliberately: map-reduce fires N sequential LLM calls, and on a slow
 # CPU box (~1-3 tok/s) each call can exceed the request timeout. Single-pass
@@ -31,9 +37,10 @@ _TRANSCRIPT_BUDGET = 9000
 # genuinely huge transcripts fall back to map-reduce.
 _MAPREDUCE_THRESHOLD = 30000
 _CHUNK_SIZE = 6000
-# Context window: 4096 comfortably fits a 9k-char transcript + output and is
-# markedly faster to allocate/process on CPU than 8192.
-_NUM_CTX = 4096
+# Context window: 8192 holds a full ~16k-char transcript (~4k tokens) plus the
+# system prompt and generated JSON. Prompt-eval cost scales with actual tokens,
+# not this ceiling, so the larger window only matters for long meetings.
+_NUM_CTX = 8192
 
 
 _LEADING_DATE = re.compile(r"^20\d{2}[-_]?\d{2}[-_]?\d{2}[-_ ]*")
@@ -62,14 +69,31 @@ class OllamaEnricher:
         model: str = "llama3.2:3b",
         timeout: float = 600.0,
         two_pass: bool = True,
+        context_profile: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.two_pass = two_pass
+        self.context_profile = context_profile.strip()
+
+    @classmethod
+    def from_config(cls, cfg: Config) -> OllamaEnricher:
+        """Build an enricher from the app config (the single construction point)."""
+        return cls(
+            cfg.ollama_base_url,
+            cfg.ollama_model,
+            cfg.ollama_timeout_sec,
+            two_pass=cfg.two_pass_extraction,
+            context_profile=cfg.context_profile,
+        )
 
     def available(self) -> bool:
-        """True if the Ollama server responds and the model is present."""
+        """True if the Ollama server responds and the chat model is present."""
+        return self.model_present(self.model)
+
+    def model_present(self, model: str) -> bool:
+        """True if the Ollama server responds and ``model`` is pulled."""
         try:
             resp = httpx.get(f"{self.base_url}/api/tags", timeout=5.0)
             resp.raise_for_status()
@@ -77,8 +101,17 @@ class OllamaEnricher:
             return False
         names = {m.get("name", "") for m in resp.json().get("models", [])}
         # tolerate "llama3.2:3b" vs "llama3.2:3b-instruct-q4_K_M" style suffixes
-        base = self.model.split(":")[0]
-        return any(n == self.model or n.startswith(base) for n in names)
+        base = model.split(":")[0]
+        return any(n == model or n.startswith(base) for n in names)
+
+    def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        """Return an embedding vector per input text. Raises on transport error."""
+        if not texts:
+            return []
+        payload = {"model": model, "input": texts}
+        resp = httpx.post(f"{self.base_url}/api/embed", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return [[float(x) for x in vec] for vec in resp.json()["embeddings"]]
 
     def enrich(
         self, transcript: str, meeting_date: date, source_name: str
@@ -158,11 +191,18 @@ class OllamaEnricher:
             log.warning("second_pass_skipped", error=str(exc))
             return
 
-        _merge_unique(insights, missed)
-        log.info(
-            "second_pass_merged",
-            added_actions=len(missed.action_items),
-            added_decisions=len(missed.decisions),
+        added = _merge_unique(insights, missed)
+        insights.missed_items.extend(added)
+        log.info("second_pass_merged", surfaced=len(added))
+
+    def _with_profile(self, system: str) -> str:
+        """Prepend the user's standing context so every call is tailored to them."""
+        if not self.context_profile:
+            return system
+        return (
+            "STANDING CONTEXT about the user and their work (use it to interpret the "
+            "transcript and weight what matters; do NOT treat it as facts to extract):\n"
+            f"{self.context_profile}\n\n---\n\n{system}"
         )
 
     def chat(self, system: str, user: str, temperature: float = 0.2) -> str:
@@ -170,7 +210,7 @@ class OllamaEnricher:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": self._with_profile(system)},
                 {"role": "user", "content": user},
             ],
             "stream": False,
@@ -187,7 +227,7 @@ class OllamaEnricher:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": self._with_profile(system)},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
@@ -221,16 +261,30 @@ def _coerce_missed(content: str) -> str:
     return json.dumps(data)
 
 
-def _merge_unique(into: MeetingInsights, extra: MeetingInsights) -> None:
-    """Append items from ``extra`` that aren't already in ``into`` (case-insensitive)."""
+def _merge_unique(into: MeetingInsights, extra: MeetingInsights) -> list[str]:
+    """Append items from ``extra`` not already in ``into`` (case-insensitive).
+
+    Returns a readable description of each item that was newly added, so callers
+    can surface "what the first pass missed" separately.
+    """
+    added: list[str] = []
+
     have_actions = {a.task.strip().lower() for a in into.action_items}
     for a in extra.action_items:
         if a.task.strip() and a.task.strip().lower() not in have_actions:
             into.action_items.append(a)
             have_actions.add(a.task.strip().lower())
+            added.append(f"{a.task.strip()} ({a.owner})" if a.owner else a.task.strip())
 
-    into.decisions.extend(_new_strings(into.decisions, extra.decisions))
-    into.follow_ups.extend(_new_strings(into.follow_ups, extra.follow_ups))
+    new_decisions = _new_strings(into.decisions, extra.decisions)
+    into.decisions.extend(new_decisions)
+    added.extend(new_decisions)
+
+    new_follow_ups = _new_strings(into.follow_ups, extra.follow_ups)
+    into.follow_ups.extend(new_follow_ups)
+    added.extend(new_follow_ups)
+
+    return added
 
 
 def _new_strings(existing: list[str], candidates: list[str]) -> list[str]:

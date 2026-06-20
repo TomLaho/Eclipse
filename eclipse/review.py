@@ -16,6 +16,9 @@ import frontmatter
 
 from eclipse.config import Config
 from eclipse.enrich.llm import OllamaEnricher
+from eclipse.log import get_logger
+
+log = get_logger("review")
 
 # folders inside the vault that are not meeting notes
 _RESERVED = {"_audio", "_digests", "_todos", "_attachments"}
@@ -128,6 +131,7 @@ def build_corpus(vault_dir: Path, budget: int = _CORPUS_BUDGET) -> str:
             f"Open actions:\n{open_lines}\n" if open_lines else ""
         )
         if used + len(block) > budget:
+            log.info("corpus_truncated", included=len(blocks), total=len(notes))
             break
         blocks.append(block)
         used += len(block)
@@ -142,14 +146,36 @@ _ASK_SYSTEM = (
 
 
 def answer_question(cfg: Config, question: str) -> str:
-    corpus = build_corpus(cfg.vault_dir)
-    if not corpus.strip():
-        return "No meetings in the vault yet."
-    enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+    enricher = OllamaEnricher.from_config(cfg)
     if not enricher.available():
         return "Local LLM (Ollama) is not reachable, so Q&A is unavailable. Run `ollama serve`."
+    corpus = _retrieve_corpus(cfg, enricher, question)
+    if not corpus.strip():
+        return "No meetings in the vault yet."
     user = f"MEETING NOTES:\n{corpus}\n\nQUESTION: {question}"
     return enricher.chat(_ASK_SYSTEM, user)
+
+
+def _retrieve_corpus(cfg: Config, enricher: OllamaEnricher, question: str) -> str:
+    """Most-relevant chunks via embeddings when available; else every summary.
+
+    Semantic retrieval scales to large vaults; the compact-summary corpus is the
+    fallback when the embedding model isn't pulled or anything goes wrong.
+    """
+    if enricher.model_present(cfg.embed_model):
+        try:
+            from eclipse.search import EmbeddingIndex, semantic_corpus
+
+            # read-only: the index is built by `eclipse index` / after processing,
+            # never re-embedded inside an interactive `ask` (slow on a CPU box).
+            with EmbeddingIndex(cfg.embeddings_path) as index:
+                qvec = enricher.embed([question], cfg.embed_model)[0]
+                hits = index.search(qvec, cfg.ask_top_k)
+            if hits:
+                return semantic_corpus(hits)
+        except Exception as exc:  # fall back rather than fail the question
+            log.warning("semantic_search_failed", error=str(exc))
+    return build_corpus(cfg.vault_dir)
 
 
 # --- digest ("nothing missed") -------------------------------------------
@@ -191,7 +217,7 @@ def build_digest(cfg: Config, with_briefing: bool = True) -> str:
     ]
 
     if with_briefing and actions:
-        enricher = OllamaEnricher(cfg.ollama_base_url, cfg.ollama_model, cfg.ollama_timeout_sec)
+        enricher = OllamaEnricher.from_config(cfg)
         if enricher.available():
             listing = "\n".join(
                 f"- {a.task} (owner: {a.owner or '?'}, due: {a.due or '?'}, "
@@ -219,13 +245,17 @@ def build_digest(cfg: Config, with_briefing: bool = True) -> str:
     return "\n".join(lines)
 
 
-def write_digest(cfg: Config, with_briefing: bool = True) -> Path:
+def write_digest(cfg: Config, with_briefing: bool = True, body: str | None = None) -> Path:
     from datetime import date as _date
 
+    # Reuse a pre-built body when the caller already has one — building it again
+    # re-runs the LLM briefing, which is a multi-minute call on a slow CPU box.
+    if body is None:
+        body = build_digest(cfg, with_briefing=with_briefing)
     out_dir = cfg.vault_dir / "_digests"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{_date.today().isoformat()}-digest.md"
-    path.write_text(build_digest(cfg, with_briefing=with_briefing), encoding="utf-8")
+    path.write_text(body, encoding="utf-8")
     return path
 
 

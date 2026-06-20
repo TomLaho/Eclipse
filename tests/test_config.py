@@ -25,3 +25,15 @@ def test_init_args_beat_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.chdir(tmp_path)
     c = load_config(whisper_model="tiny.en")
     assert c.whisper_model == "tiny.en"
+
+
+def test_context_profile_reads_file(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.md"
+    profile.write_text("  Tom leads cost-out at Endeavour.  \n", encoding="utf-8")
+    c = Config(context_profile_path=profile)
+    assert c.context_profile == "Tom leads cost-out at Endeavour."
+
+
+def test_context_profile_empty_when_missing(tmp_path: Path) -> None:
+    c = Config(context_profile_path=tmp_path / "nope.md")
+    assert c.context_profile == ""

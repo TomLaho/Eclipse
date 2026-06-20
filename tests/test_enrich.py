@@ -1,8 +1,20 @@
 from datetime import date
 
 from eclipse.enrich.dates import resolve_action_dates, resolve_due
-from eclipse.enrich.llm import _merge_unique
+from eclipse.enrich.llm import OllamaEnricher, _merge_unique
 from eclipse.models import ActionItem, MeetingInsights
+
+
+def test_with_profile_prepends_standing_context() -> None:
+    enricher = OllamaEnricher(context_profile="Tom leads cost-out at Endeavour.")
+    out = enricher._with_profile("Base system prompt.")
+    assert "Tom leads cost-out at Endeavour." in out
+    assert out.rstrip().endswith("Base system prompt.")
+
+
+def test_with_profile_noop_when_empty() -> None:
+    enricher = OllamaEnricher(context_profile="  ")
+    assert enricher._with_profile("Base system prompt.") == "Base system prompt."
 
 
 def test_resolve_due_relative_to_meeting() -> None:
@@ -44,7 +56,18 @@ def test_merge_unique_dedups_case_insensitively() -> None:
         decisions=["Use option A", "Defer hiring"],
         follow_ups=["Confirm budget"],
     )
-    _merge_unique(base, extra)
+    added = _merge_unique(base, extra)
     assert [a.task for a in base.action_items] == ["Send deck", "Book venue"]
     assert base.decisions == ["Use option A", "Defer hiring"]
     assert base.follow_ups == ["Confirm budget"]
+    # The returned delta is exactly what was newly surfaced (drives "may have missed").
+    assert added == ["Book venue", "Defer hiring", "Confirm budget"]
+
+
+def test_merge_unique_includes_owner_in_delta() -> None:
+    base = MeetingInsights(title="t", summary="s")
+    extra = MeetingInsights(
+        title="", summary="", action_items=[ActionItem(task="Send report", owner="Tom")]
+    )
+    added = _merge_unique(base, extra)
+    assert added == ["Send report (Tom)"]

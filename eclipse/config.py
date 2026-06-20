@@ -53,6 +53,18 @@ class Config(BaseSettings):
     ollama_timeout_sec: float = 600.0
     # second LLM pass that re-reads the transcript for missed commitments
     two_pass_extraction: bool = True
+    # standing context (who you are, recurring people, what to prioritise) read
+    # from this file and prepended to every LLM call; empty/missing = no profile
+    context_profile_path: Path = Path("context_profile.md")
+
+    # --- semantic search (local embeddings via Ollama) ---
+    # Embedding model for `ask` retrieval. When present, `ask` embeds your question
+    # and pulls the most relevant note chunks instead of stuffing every summary in.
+    # Falls back to the compact-summary corpus when the model isn't pulled.
+    embed_model: str = "nomic-embed-text"
+    embeddings_path: Path = Path("data/embeddings.sqlite")
+    # how many retrieved chunks to feed the LLM when answering
+    ask_top_k: int = 12
 
     # --- behaviour ---
     audio_retention: RetentionPolicy = "keep"
@@ -89,6 +101,14 @@ class Config(BaseSettings):
         return sub if sub.is_absolute() else self.vault_dir / sub
 
     @property
+    def context_profile(self) -> str:
+        """Standing-context text for the LLM, or '' if no profile file exists."""
+        try:
+            return self.context_profile_path.expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    @property
     def effective_initial_prompt(self) -> str | None:
         """Combine the glossary and any explicit prompt into Whisper's seed text."""
         parts: list[str] = []
@@ -104,6 +124,7 @@ class Config(BaseSettings):
         self.vault_dir = self.vault_dir.expanduser().resolve()
         self.archive_dir = self.archive_dir.expanduser().resolve()
         self.registry_path = self.registry_path.expanduser().resolve()
+        self.embeddings_path = self.embeddings_path.expanduser().resolve()
 
     def ensure_dirs(self) -> None:
         """Create the directories Eclipse needs to operate."""

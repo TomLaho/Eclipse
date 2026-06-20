@@ -14,6 +14,7 @@ class ActionItem(BaseModel):
     owner: str | None = None
     due: str | None = None  # free-text date as spoken, e.g. "Friday", "20/06"
     due_iso: str | None = None  # resolved ISO date (YYYY-MM-DD), filled deterministically
+    detail: str | None = None  # one-clause context: what's needed or why
 
     def is_mine(self, me_aliases: list[str]) -> bool:
         if self.owner is None:
@@ -33,6 +34,9 @@ class MeetingInsights(BaseModel):
     decisions: list[str] = Field(default_factory=list)
     action_items: list[ActionItem] = Field(default_factory=list)
     follow_ups: list[str] = Field(default_factory=list)
+    # Items the second enrichment pass surfaced that the first read missed.
+    # Used to drive the "you may have missed" Telegram callout; not persisted.
+    missed_items: list[str] = Field(default_factory=list)
 
 
 class Word(BaseModel):

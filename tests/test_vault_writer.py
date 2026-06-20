@@ -38,6 +38,18 @@ def test_render_has_frontmatter_and_checkbox() -> None:
     assert "## Transcript" in md
 
 
+def test_multiline_summary_stays_inside_callout() -> None:
+    pm = _pm()
+    pm.insights.summary = "First sentence.\nSecond line.\n\nFourth after a blank."
+    md = render_markdown(pm)
+    # Every summary line (including the blank one) must be quoted, or Obsidian
+    # drops the tail out of the callout block.
+    assert "> First sentence." in md
+    assert "> Second line." in md
+    assert "> Fourth after a blank." in md
+    assert "\nSecond line." not in md  # i.e. never an unquoted continuation
+
+
 def test_slugify() -> None:
     assert slugify("Acme Corp!! Pricing") == "acme-corp-pricing"
     assert slugify("   ") == "untitled"

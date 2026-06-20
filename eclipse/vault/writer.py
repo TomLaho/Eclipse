@@ -21,6 +21,8 @@ def slugify(text: str, max_len: int = 60) -> str:
 
 def _format_action(item: ActionItem) -> str:
     line = f"- [ ] {item.task}"
+    if item.detail:
+        line += f" — {item.detail}"
     meta = []
     if item.owner:
         meta.append(f"**{item.owner}**")
@@ -73,7 +75,9 @@ def render_markdown(pm: ProcessedMeeting) -> str:
     }
 
     lines: list[str] = [f"# {ins.title}", ""]
-    lines += ["> [!summary] Summary", f"> {ins.summary}", ""]
+    # Prefix every line so a multi-line summary stays inside the callout block.
+    summary_lines = [f"> {ln}" for ln in (ins.summary.splitlines() or [""])]
+    lines += ["> [!summary] Summary", *summary_lines, ""]
 
     lines += ["## Action items", ""]
     if ins.action_items:
@@ -100,17 +104,26 @@ def render_markdown(pm: ProcessedMeeting) -> str:
     return frontmatter.dumps(post)
 
 
-def write_note(vault_dir: Path, pm: ProcessedMeeting) -> Path:
-    """Write the note under ``vault/<client>/<date>-<slug>.md`` and return its path."""
+def write_note(vault_dir: Path, pm: ProcessedMeeting, replacing: Path | None = None) -> Path:
+    """Write the note under ``vault/<client>/<date>-<slug>.md`` and return its path.
+
+    Pass *replacing* (re-enrichment) to overwrite the note at that path instead of
+    bumping it to a ``-2`` suffix. The render is written to a temp file and moved
+    into place, so a failed render or write never destroys an existing note (often
+    the only copy once the audio is gone).
+    """
     client_dir = vault_dir / slugify(pm.insights.client)
     client_dir.mkdir(parents=True, exist_ok=True)
 
     base = f"{pm.meeting_date.isoformat()}-{slugify(pm.insights.title)}"
     path = client_dir / f"{base}.md"
     n = 2
-    while path.exists():
+    while path.exists() and path != replacing:
         path = client_dir / f"{base}-{n}.md"
         n += 1
 
-    path.write_text(render_markdown(pm), encoding="utf-8")
+    content = render_markdown(pm)  # before any disk mutation, so a render error is safe
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
     return path

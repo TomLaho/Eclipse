@@ -143,14 +143,18 @@ class NotionTodos:
         db_id: str,
         action: OpenAction,
         status: str = "Review",
+        existing: set[str] | None = None,
     ) -> bool:
         """Create a Notion page for *action* in *db_id*.
 
         Returns False without creating if the EclipseId is already present
-        (dedup). Returns True on successful creation.
+        (dedup). Returns True on successful creation. Pass *existing* (from
+        ``existing_ids``) when pushing in a loop to avoid one query per action;
+        newly-created ids are added to it so same-run duplicates are caught too.
         """
         eid = eclipse_id(action)
-        existing = self.existing_ids(db_id)
+        if existing is None:
+            existing = self.existing_ids(db_id)
         if eid in existing:
             log.info("notion_todo_skip_duplicate", eclipse_id=eid, task=action.task)
             return False
@@ -188,5 +192,6 @@ class NotionTodos:
             parent={"database_id": db_id},
             properties=properties,
         )
+        existing.add(eid)  # dedup later actions in the same run against this one
         log.info("notion_todo_pushed", eclipse_id=eid, task=action.task)
         return True
