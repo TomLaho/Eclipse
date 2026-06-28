@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -196,10 +197,27 @@ def watch_cmd(  # registered below as `eclipse watch`
             if result.status == "written":
                 _refresh_index(cfg)
 
+        def rescan() -> None:
+            # Safety sweep: cloud-sync clients often don't emit filesystem
+            # events, so poll the whole inbox hourly to catch anything the
+            # watchdog observer missed. The registry dedupes, so re-seeing an
+            # already-processed file is a no-op.
+            wrote = False
+            for f in scan_inbox(cfg.inbox_dir):
+                if pipeline.process_file(f).status == "written":
+                    wrote = True
+            if wrote:
+                _refresh_index(cfg)
+
+        rescan_interval = 3600.0  # seconds
+        last_rescan = time.monotonic()
+
         console.print(f"[bold]Watching[/bold] {cfg.inbox_dir} (Ctrl-C to stop)")
         try:
             for _ in watch(cfg.inbox_dir, handler):
-                pass
+                if time.monotonic() - last_rescan >= rescan_interval:
+                    last_rescan = time.monotonic()
+                    rescan()
         except KeyboardInterrupt:
             console.print("\nStopped.")
 
